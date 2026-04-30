@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(&config.log_level, &config.log_format);
 
     tracing::info!(port = config.server.grpc_port, "Starting ClawDB server");
-    let engine = ClawDBEngine::start(config).await?;
+    let engine = ClawDBEngine::start_with(config).await?;
 
     let shutdown = GracefulShutdown::new(30);
     shutdown.wait_for_signal().await;

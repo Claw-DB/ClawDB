@@ -1,13 +1,21 @@
-//! ClawDB command-line interface.
+//! ClawDB command-line interface — entry point and top-level command dispatch.
+
+mod commands;
 
 use clap::{Parser, Subcommand};
-use clawdb::{ClawDBConfig, ClawDBEngine};
+use clawdb::ClawDBConfig;
 use clawdb::telemetry::init_tracing;
+use commands::{
+    branch::BranchArgs, config::ConfigArgs, init::InitArgs, policy::PolicyArgs,
+    reflect::ReflectArgs, remember::RememberArgs, search::SearchArgs, start::StartArgs,
+    status::StatusArgs, sync::SyncArgs,
+};
 
 #[derive(Parser)]
-#[command(name = "clawdb-cli", about = "ClawDB CLI", version)]
+#[command(name = "clawdb", about = "ClawDB — the aggregate AI memory runtime", version)]
 struct Cli {
-    #[arg(long, env = "CLAW_DATA_DIR")]
+    /// Path to the ClawDB data directory.
+    #[arg(long, env = "CLAW_DATA_DIR", global = true)]
     data_dir: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
@@ -16,11 +24,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print health status.
-    Health,
-    /// Print effective configuration.
-    Config,
-    /// Print runtime version.
+    /// Initialise a new ClawDB data directory.
+    Init(InitArgs),
+    /// Start the embedded ClawDB server.
+    Start(StartArgs),
+    /// Print runtime health and statistics.
+    Status(StatusArgs),
+    /// Store a memory entry.
+    Remember(RememberArgs),
+    /// Search for memories.
+    Search(SearchArgs),
+    /// Manage branches.
+    Branch(BranchArgs),
+    /// Trigger a sync cycle.
+    Sync(SyncArgs),
+    /// Trigger a memory reflection job.
+    Reflect(ReflectArgs),
+    /// Manage security policies.
+    Policy(PolicyArgs),
+    /// Read or write ClawDB configuration.
+    Config(ConfigArgs),
+    /// Print the ClawDB version.
     Version,
 }
 
@@ -32,22 +56,24 @@ async fn main() -> anyhow::Result<()> {
         .data_dir
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".clawdb"));
 
-    let config = ClawDBConfig::load_or_default(&data_dir)?;
-    init_tracing(&config.log_level, &config.log_format);
+    // Initialise tracing before anything else (best-effort; config may not exist yet).
+    if let Ok(cfg) = ClawDBConfig::load_or_default(&data_dir) {
+        init_tracing(&cfg.log_level, &cfg.log_format);
+    }
 
-    match cli.command {
-        Command::Health => {
-            let engine = ClawDBEngine::start(config).await?;
-            let report = engine.health().await;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            engine.shutdown().await?;
-        }
-        Command::Config => {
-            let raw = toml::to_string_pretty(&config).unwrap_or_default();
-            println!("{raw}");
-        }
+    match &cli.command {
+        Command::Init(args) => commands::init::run(&data_dir, args).await?,
+        Command::Start(args) => commands::start::run(&data_dir, args).await?,
+        Command::Status(args) => commands::status::run(&data_dir, args).await?,
+        Command::Remember(args) => commands::remember::run(&data_dir, args).await?,
+        Command::Search(args) => commands::search::run(&data_dir, args).await?,
+        Command::Branch(args) => commands::branch::run(&data_dir, args).await?,
+        Command::Sync(args) => commands::sync::run(&data_dir, args).await?,
+        Command::Reflect(args) => commands::reflect::run(&data_dir, args).await?,
+        Command::Policy(args) => commands::policy::run(&data_dir, args).await?,
+        Command::Config(args) => commands::config::run(&data_dir, args).await?,
         Command::Version => {
-            println!("clawdb-cli {}", env!("CARGO_PKG_VERSION"));
+            println!("clawdb {}", env!("CARGO_PKG_VERSION"));
         }
     }
 

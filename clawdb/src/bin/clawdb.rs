@@ -44,14 +44,14 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve { port: _ } => {
             tracing::info!("Starting ClawDB engine…");
-            let engine = ClawDBEngine::start(config).await?;
+            let engine = ClawDBEngine::start_with(config).await?;
             let shutdown = GracefulShutdown::new(30);
             shutdown.wait_for_signal().await;
             engine.shutdown().await?;
             tracing::info!("ClawDB stopped cleanly");
         }
         Command::Health => {
-            let engine = ClawDBEngine::start(config).await?;
+            let engine = ClawDBEngine::start_with(config).await?;
             let report = engine.health().await;
             println!("{}", serde_json::to_string_pretty(&report)?);
             engine.shutdown().await?;
