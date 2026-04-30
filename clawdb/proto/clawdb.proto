@@ -1,0 +1,202 @@
+syntax = "proto3";
+package clawdb.v1;
+
+// Unified ClawDB gRPC service definition exposing the entire ClawDB API.
+
+// ── Memory messages ──────────────────────────────────────────────────────────
+
+message MemoryEntry {
+  string id             = 1;
+  string agent_id       = 2;
+  string content        = 3;
+  string memory_type    = 4;
+  bytes  metadata_json  = 5;
+  repeated string tags  = 6;
+  int64  created_at     = 7;
+  float  importance_score = 8;
+  bool   is_promoted    = 9;
+}
+
+message RememberRequest {
+  string agent_id      = 1;
+  string content       = 2;
+  string memory_type   = 3;
+  bytes  metadata_json = 4;
+  repeated string tags = 5;
+  string session_token = 6;
+}
+
+message RememberResponse {
+  string memory_id       = 1;
+  float  importance_score = 2;
+  bool   guard_applied   = 3;
+}
+
+message SearchRequest {
+  string agent_id      = 1;
+  string query         = 2;
+  bool   semantic      = 3;
+  int32  top_k         = 4;
+  bytes  filter_json   = 5;
+  string session_token = 6;
+  float  alpha         = 7;
+}
+
+message SearchResponse {
+  repeated MemoryEntry results = 1;
+  float  latency_ms    = 2;
+  string search_type   = 3;
+}
+
+message RecallRequest {
+  string agent_id              = 1;
+  repeated string memory_ids   = 2;
+  string session_token         = 3;
+}
+
+message RecallResponse {
+  repeated MemoryEntry memories  = 1;
+  repeated string denied_ids     = 2;
+}
+
+// ── Branch messages ───────────────────────────────────────────────────────────
+
+message BranchRequest {
+  string agent_id         = 1;
+  string parent_branch_name = 2;
+  string new_branch_name  = 3;
+  string description      = 4;
+  string session_token    = 5;
+}
+
+message BranchResponse {
+  string branch_id   = 1;
+  string branch_name = 2;
+  int64  created_at  = 3;
+}
+
+message MergeRequest {
+  string agent_id      = 1;
+  string source_branch = 2;
+  string target_branch = 3;
+  string strategy      = 4;
+  string session_token = 5;
+}
+
+message MergeResponse {
+  bool   success              = 1;
+  int32  applied              = 2;
+  int32  conflicts            = 3;
+  repeated string conflict_ids = 4;
+}
+
+message DiffRequest {
+  string agent_id      = 1;
+  string branch_a      = 2;
+  string branch_b      = 3;
+  string session_token = 4;
+}
+
+message DiffResponse {
+  int32  added            = 1;
+  int32  removed          = 2;
+  int32  modified         = 3;
+  float  divergence_score = 4;
+  bytes  diff_json        = 5;
+}
+
+// ── Sync messages ─────────────────────────────────────────────────────────────
+
+message SyncRequest {
+  string agent_id      = 1;
+  string workspace_id  = 2;
+  string session_token = 3;
+}
+
+message SyncResponse {
+  bool  success    = 1;
+  int32 pushed     = 2;
+  int32 pulled     = 3;
+  int32 conflicts  = 4;
+  int64 synced_at  = 5;
+}
+
+// ── Reflect messages ──────────────────────────────────────────────────────────
+
+message ReflectRequest {
+  string agent_id      = 1;
+  string job_type      = 2;
+  bool   dry_run       = 3;
+  string session_token = 4;
+}
+
+message ReflectResponse {
+  string job_id    = 1;
+  int32  processed = 2;
+  int32  archived  = 3;
+  int32  promoted  = 4;
+}
+
+// ── Session messages ──────────────────────────────────────────────────────────
+
+message SessionRequest {
+  string agent_id           = 1;
+  string role               = 2;
+  repeated string scopes    = 3;
+  string task_type          = 4;
+}
+
+message SessionResponse {
+  string session_token        = 1;
+  int64  expires_at           = 2;
+  repeated string granted_scopes = 3;
+}
+
+// ── System messages ───────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool   ok                        = 1;
+  map<string, string> component_status = 2;
+  string version                   = 3;
+  int64  uptime_secs               = 4;
+}
+
+message StatusRequest {
+  string agent_id      = 1;
+  string session_token = 2;
+}
+
+message StatusResponse {
+  int64  memory_count          = 1;
+  int64  session_count         = 2;
+  string active_branch         = 3;
+  bool   sync_connected        = 4;
+  float  last_reflect_ago_secs = 5;
+  bytes  agent_stats_json      = 6;
+}
+
+message EventMessage {
+  string event_type  = 1;
+  string agent_id    = 2;
+  bytes  payload_json = 3;
+  int64  timestamp   = 4;
+}
+
+// ── ClawDB unified service ────────────────────────────────────────────────────
+
+service ClawDBService {
+  rpc Remember(RememberRequest)       returns (RememberResponse);
+  rpc Search(SearchRequest)           returns (SearchResponse);
+  rpc Recall(RecallRequest)           returns (RecallResponse);
+  rpc Branch(BranchRequest)           returns (BranchResponse);
+  rpc Merge(MergeRequest)             returns (MergeResponse);
+  rpc Diff(DiffRequest)               returns (DiffResponse);
+  rpc Sync(SyncRequest)               returns (SyncResponse);
+  rpc Reflect(ReflectRequest)         returns (ReflectResponse);
+  rpc CreateSession(SessionRequest)   returns (SessionResponse);
+  rpc Health(HealthRequest)           returns (HealthResponse);
+  rpc Status(StatusRequest)           returns (StatusResponse);
+  rpc StreamEvents(SessionRequest)    returns (stream EventMessage);
+}

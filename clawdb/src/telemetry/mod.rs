@@ -1,0 +1,7 @@
+//! Observability: structured logging, metrics, and distributed tracing.
+
+pub mod metrics;
+pub mod tracing_setup;
+
+pub use metrics::Metrics;
+pub use tracing_setup::init_tracing;

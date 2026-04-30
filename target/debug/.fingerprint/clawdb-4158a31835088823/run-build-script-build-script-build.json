@@ -1,0 +1,1 @@
+{"rustc":5391851738765093524,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[17599148414077167074,"build_script_build",false,11544115587194597881]],"local":[{"RerunIfChanged":{"output":"debug/build/clawdb-4158a31835088823/output","paths":["proto/clawdb.proto","proto"]}}],"rustflags":[],"config":0,"compile_kind":0}

@@ -1,0 +1,4 @@
+cargo:rustc-check-cfg=cfg(proto_compiled)
+cargo:rerun-if-changed=proto/clawdb.proto
+cargo:rerun-if-changed=proto
+cargo:warning=Proto compilation skipped (protoc unavailable): Could not find `protoc`. If `protoc` is installed, try setting the `PROTOC` environment variable to the path of the `protoc` binary. To install it on Debian, run `apt-get install protobuf-compiler`. It is also available at https://github.com/protocolbuffers/protobuf/releases  For more information: https://docs.rs/prost-build/#sourcing-protoc

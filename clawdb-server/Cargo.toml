@@ -1,0 +1,22 @@
+[package]
+name = "clawdb-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "ClawDB gRPC server binary"
+
+[[bin]]
+name = "clawdb-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clawdb = { path = "../clawdb" }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+dirs = "5"
