@@ -1,0 +1,55 @@
+[package]
+name = "clawdb"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "ClawDB aggregate runtime"
+
+[lib]
+name = "clawdb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clawdb"
+path = "src/bin/clawdb.rs"
+
+[dependencies]
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+tokio-util.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+arc-swap.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+backoff.workspace = true
+
+claw-core = { path = "../../claw-core" }
+claw-vector = { path = "../../claw-vector" }
+claw-sync = { path = "../../claw-sync" }
+claw-branch = { path = "../../claw-branch" }
+claw-guard = { path = "../../claw-guard" }
+
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+toml = "0.8"
+notify = "6"
+reqwest = { version = "0.12", features = ["json"] }
+anyhow = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+rstest = "0.21"
