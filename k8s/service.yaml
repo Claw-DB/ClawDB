@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: clawdb-http
+spec:
+  type: LoadBalancer
+  selector:
+    app: clawdb
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clawdb-grpc
+spec:
+  type: ClusterIP
+  selector:
+    app: clawdb
+  ports:
+    - name: grpc
+      protocol: TCP
+      port: 50050
+      targetPort: 50050
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clawdb-metrics
+spec:
+  type: ClusterIP
+  selector:
+    app: clawdb
+  ports:
+    - name: metrics
+      protocol: TCP
+      port: 9090
+      targetPort: 9090

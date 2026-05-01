@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  clawdb:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "50050:50050"
+      - "8080:8080"
+      - "9090:9090"
+    env_file:
+      - .env
+    volumes:
+      - clawdb_data:/home/clawdb/.clawdb
+    healthcheck:
+      test: ["CMD-SHELL", "clawdb-cli status --json 2>/dev/null | grep -q '\"ok\":true'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      - postgres
+      - redis
+
+  claw-reflect:
+    image: claw-reflect:latest
+    ports:
+      - "8090:8090"
+    env_file:
+      - .env.reflect
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: clawdb
+      POSTGRES_USER: clawdb
+      POSTGRES_PASSWORD: clawdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  clawdb_data:
+  pgdata:
+  redisdata:
+  grafana_data:

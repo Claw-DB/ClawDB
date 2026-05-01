@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: clawdb
+    orgId: 1
+    folder: ClawDB
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clawdb
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clawdb
+  template:
+    metadata:
+      labels:
+        app: clawdb
+    spec:
+      containers:
+        - name: clawdb
+          image: ghcr.io/clawdb/clawdb:latest
+          ports:
+            - containerPort: 50050
+              name: grpc
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: clawdb-config
+            - secretRef:
+                name: clawdb-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "256m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clawdb-config
+data:
+  CLAW_LOG_LEVEL: "info"
+  CLAW_LOG_FORMAT: "json"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clawdb-secrets
+type: Opaque
+stringData:
+  jwt_secret: "change-me"
+  llm_api_key: "change-me"

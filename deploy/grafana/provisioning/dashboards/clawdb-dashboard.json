@@ -1,0 +1,21 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Queries / sec",
+      "targets": [{"expr": "rate(clawdb_queries_total[1m])"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Session Count",
+      "targets": [{"expr": "clawdb_active_sessions_total"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    }
+  ],
+  "schemaVersion": 39,
+  "title": "ClawDB Runtime",
+  "version": 1
+}
