@@ -243,6 +243,11 @@ impl ComponentLifecycleManager {
             .ok_or_else(|| ClawDBError::ComponentNotReady("reflect".to_string()))
     }
 
+    /// Alias for `reflect()` — returns the reflect client.
+    pub fn reflect_client(&self) -> ClawDBResult<Arc<ReflectClient>> {
+        self.reflect()
+    }
+
     /// Builds and returns an aggregate `HealthReport`.
     pub async fn health_report(&self) -> HealthReport {
         let components = self.health.read().await.clone();

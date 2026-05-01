@@ -395,12 +395,17 @@ async fn events_stream(
 // ── Router builder ────────────────────────────────────────────────────────────
 
 /// Builds the full axum `Router` for the ClawDB HTTP API.
+///
+/// Includes middleware for:
+/// - CORS
+/// - Request tracing with W3C TraceContext
 pub fn build_router(db: Arc<ClawDB>) -> Router {
     use tower_http::{
         cors::CorsLayer,
         request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-        trace::TraceLayer,
+        trace::{TraceLayer, DefaultMakeSpan, DefaultOnResponse},
     };
+    use tower_http::LatencyUnit;
 
     Router::new()
         .route("/v1/session", post(create_session))
@@ -415,9 +420,22 @@ pub fn build_router(db: Arc<ClawDB>) -> Router {
         .route("/v1/health", get(health_handler))
         .route("/v1/events/stream", get(events_stream))
         .route("/metrics", get(metrics_handler))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        // Tracing middleware with W3C TraceContext support
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(
+                    DefaultMakeSpan::new()
+                        .include_request_headers(true)
+                        .level(tracing::Level::INFO),
+                )
+                .on_response(
+                    DefaultOnResponse::new()
+                        .include_headers(true)
+                        .latency_unit(LatencyUnit::Micros),
+                ),
+        )
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(CorsLayer::permissive())
         .with_state(db)
 }

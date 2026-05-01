@@ -78,12 +78,32 @@ impl EventEmitter {
         });
     }
 
+    /// Emits a [`ClawEvent::BranchMerged`] event.
+    pub fn branch_merged(&self, agent_id: Uuid, source: String, target: String, applied: u32) {
+        self.emit(ClawEvent::BranchMerged {
+            agent_id,
+            source,
+            target,
+            applied,
+        });
+    }
+
     /// Emits a [`ClawEvent::SyncCompleted`] event.
     pub fn sync_completed(&self, agent_id: Uuid, pushed: u32, pulled: u32) {
         self.emit(ClawEvent::SyncCompleted {
             agent_id,
             pushed,
             pulled,
+        });
+    }
+
+    /// Emits a [`ClawEvent::ReflectionCompleted`] event.
+    pub fn reflection_completed(&self, agent_id: Uuid, job_id: String, archived: u32, promoted: u32) {
+        self.emit(ClawEvent::ReflectionCompleted {
+            agent_id,
+            job_id,
+            archived,
+            promoted,
         });
     }
 
@@ -108,6 +128,21 @@ impl EventEmitter {
         self.emit(ClawEvent::ComponentHealthChanged {
             component: component.to_string(),
             healthy,
+        });
+    }
+
+    /// Emits a [`ClawEvent::PluginLoaded`] event.
+    pub fn plugin_loaded(&self, name: &str, version: &str) {
+        self.emit(ClawEvent::PluginLoaded {
+            name: name.to_string(),
+            version: version.to_string(),
+        });
+    }
+
+    /// Emits a [`ClawEvent::PluginUnloaded`] event.
+    pub fn plugin_unloaded(&self, name: &str) {
+        self.emit(ClawEvent::PluginUnloaded {
+            name: name.to_string(),
         });
     }
 

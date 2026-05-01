@@ -2,64 +2,218 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: clawdb
+  namespace: default
+  labels:
+    app: clawdb
+    version: v1
 spec:
   replicas: 2
   selector:
     matchLabels:
       app: clawdb
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   template:
     metadata:
       labels:
         app: clawdb
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
     spec:
+      serviceAccountName: clawdb
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      
       containers:
         - name: clawdb
           image: ghcr.io/clawdb/clawdb:latest
+          imagePullPolicy: IfNotPresent
+          
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          
           ports:
             - containerPort: 50050
               name: grpc
+              protocol: TCP
             - containerPort: 8080
               name: http
+              protocol: TCP
             - containerPort: 9090
               name: metrics
+              protocol: TCP
+          
+          # Environment from ConfigMap and Secrets
           envFrom:
             - configMapRef:
                 name: clawdb-config
             - secretRef:
                 name: clawdb-secrets
+          
+          # Individual environment variables
+          env:
+            - name: CLAW_DATA_DIR
+              value: "/data/clawdb"
+            - name: RUST_BACKTRACE
+              value: "1"
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef:
+                  name: clawdb-config
+                  key: CLAW_LOG_LEVEL
+                  optional: true
+          
+          # Resource requests and limits
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: 500m
+              memory: 512Mi
             limits:
-              cpu: "256m"
-              memory: "512Mi"
+              cpu: 2000m
+              memory: 2Gi
+          
+          # Readiness probe - checks if service is ready to accept traffic
           readinessProbe:
             httpGet:
-              path: /health
-              port: 8080
+              path: /v1/health
+              port: http
+              scheme: HTTP
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          
+          # Liveness probe - checks if service is alive
           livenessProbe:
             httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 20
-            periodSeconds: 20
+              path: /v1/health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          # Startup probe - waits for service to start up
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          
+          # Volume mounts
+          volumeMounts:
+            - name: data
+              mountPath: /data/clawdb
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache
+      
+      # Volumes
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+      
+      # Pod disruption and affinity
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - clawdb
+                topologyKey: kubernetes.io/hostname
+      
+      # Termination grace period
+      terminationGracePeriodSeconds: 30
+
 ---
 apiVersion: v1
-kind: ConfigMap
+kind: Service
 metadata:
-  name: clawdb-config
-data:
-  CLAW_LOG_LEVEL: "info"
-  CLAW_LOG_FORMAT: "json"
+  name: clawdb
+  namespace: default
+  labels:
+    app: clawdb
+spec:
+  type: ClusterIP
+  selector:
+    app: clawdb
+  ports:
+    - port: 50050
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 9090
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+
 ---
 apiVersion: v1
-kind: Secret
+kind: ServiceAccount
 metadata:
-  name: clawdb-secrets
-type: Opaque
-stringData:
-  jwt_secret: "change-me"
-  llm_api_key: "change-me"
+  name: clawdb
+  namespace: default
+  labels:
+    app: clawdb
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: clawdb
+  namespace: default
+spec:
+  rules:
+    - apiGroups: [""]
+      resources: ["configmaps"]
+      verbs: ["get", "list", "watch"]
+    - apiGroups: [""]
+      resources: ["secrets"]
+      verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: clawdb
+  namespace: default
+spec:
+  roleRef:
+    apiGroup: rbac.authorization.k8s.io
+    kind: Role
+    name: clawdb
+  subjects:
+    - kind: ServiceAccount
+      name: clawdb
+      namespace: default

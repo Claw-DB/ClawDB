@@ -50,6 +50,7 @@ toml = "0.8"
 notify = "6"
 reqwest = { version = "0.12", features = ["json"] }
 anyhow = "1"
+cfg_if = "1"
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -59,6 +60,7 @@ tempfile = "3"
 tokio-test = "0.4"
 rstest = "0.21"
 criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1.4"
 
 [[bench]]
 name = "runtime_bench"

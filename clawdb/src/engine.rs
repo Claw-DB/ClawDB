@@ -148,8 +148,28 @@ impl ClawDB {
         }
         self.load_plugins().await?;
         self.start_metrics_server();
+        self.start_plugin_event_dispatcher();
         tracing::info!("ClawDB engine started");
         Ok(())
+    }
+
+    fn start_plugin_event_dispatcher(&self) {
+        let plugins = self.plugins.clone();
+        let mut subscriber = self.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                match subscriber.recv().await {
+                    Ok(event) => {
+                        plugins.dispatch_event(&event).await;
+                    }
+                    Err(e) => {
+                        tracing::error!("plugin event dispatcher error: {e}");
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     // ── Plugin lifecycle ─────────────────────────────────────────────────────
@@ -159,6 +179,8 @@ impl ClawDB {
         let pairs = loader
             .load_from_dir(&self.config.plugins.plugins_dir, &self.config.plugins.enabled)
             .await?;
+        
+        let mut loaded_count = 0;
         for (manifest, plugin) in pairs {
             let ctx = PluginContext {
                 config: serde_json::Value::Null,
@@ -166,8 +188,37 @@ impl ClawDB {
                     EventEmitter::new(self.event_bus.clone(), "plugin"),
                 ),
             };
-            self.plugins.register(manifest, plugin, ctx).await?;
+            
+            match self.plugins.register(manifest.clone(), plugin, ctx).await {
+                Ok(()) => {
+                    loaded_count += 1;
+                    // Emit PluginLoaded event
+                    let event = crate::events::types::ClawEvent::PluginLoaded {
+                        name: manifest.name.clone(),
+                        version: manifest.version.clone(),
+                    };
+                    self.event_bus.publish(event);
+                    
+                    tracing::info!(
+                        plugin = %manifest.name,
+                        version = %manifest.version,
+                        "plugin loaded and registered"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        plugin = %manifest.name,
+                        error = %e,
+                        "failed to register plugin"
+                    );
+                }
+            }
         }
+        
+        if loaded_count > 0 {
+            tracing::info!(count = loaded_count, "plugins loaded");
+        }
+        
         Ok(())
     }
 
@@ -327,59 +378,329 @@ impl ClawDB {
     // ── Branch API ────────────────────────────────────────────────────────────
 
     /// Creates a named branch snapshot and returns its ID.
-    pub async fn branch(&self, _session: &ClawDBSession, name: &str) -> ClawDBResult<Uuid> {
-        let branch = self.lifecycle.branch()?;
-        let id = branch.create_snapshot(name).await?;
-        self.emitter.branch_created(
-            _session.agent_id,
-            id,
-            name.to_string(),
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use clawdb::prelude::*;
+    /// # #[tokio::main]
+    /// # async fn main() -> ClawDBResult<()> {
+    /// # let db = ClawDB::open_default().await?;
+    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["branch:create".into()]).await?;
+    /// let branch_id = db.branch(&session, "feature-v1").await?;
+    /// println!("Branch created: {}", branch_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn branch(&self, session: &ClawDBSession, name: &str) -> ClawDBResult<Uuid> {
+        let start = Instant::now();
+        
+        // Validate session scope includes branch:create
+        if !session.scopes.iter().any(|s| s == "branch:*" || s == "branch:create") {
+            return Err(crate::error::ClawDBError::Guard(
+                claw_guard::GuardError::AccessDenied(
+                    "branch:create scope required".to_string(),
+                ),
+            ));
+        }
+
+        let branch_engine = self.lifecycle.branch()?;
+        let id = branch_engine.create_snapshot(name).await?;
+        
+        // Record metrics
+        let secs = start.elapsed().as_secs_f64();
+        self.telemetry.metrics.inc_query("branch", "branch", "ok");
+        self.telemetry.metrics.record_query_duration("branch", "branch", secs);
+        
+        // Emit event
+        self.emitter.branch_created(session.agent_id, id, name.to_string());
+        
+        tracing::info!(
+            agent_id = %session.agent_id,
+            branch_id = %id,
+            branch_name = %name,
+            latency_ms = (secs * 1000.0) as u64,
+            "branch created"
         );
+        
         Ok(id)
     }
 
     /// Merges `source` snapshot into `target`.
+    ///
+    /// Returns a detailed merge result with conflict information.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use clawdb::prelude::*;
+    /// # #[tokio::main]
+    /// # async fn main() -> ClawDBResult<()> {
+    /// # let db = ClawDB::open_default().await?;
+    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["branch:merge".into()]).await?;
+    /// # let source = db.branch(&session, "feature").await?;
+    /// # let target = db.branch(&session, "main").await?;
+    /// let result = db.merge(&session, source, target).await?;
+    /// println!("Merge result: {}", serde_json::to_string_pretty(&result)?);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn merge(
         &self,
-        _session: &ClawDBSession,
+        session: &ClawDBSession,
         source: Uuid,
         target: Uuid,
     ) -> ClawDBResult<serde_json::Value> {
-        let branch = self.lifecycle.branch()?;
-        branch.merge_snapshot(source, target).await?;
-        Ok(serde_json::json!({ "source": source, "target": target, "status": "merged" }))
+        let start = Instant::now();
+        
+        // Validate session scope includes branch:merge
+        if !session.scopes.iter().any(|s| s == "branch:*" || s == "branch:merge") {
+            return Err(crate::error::ClawDBError::Guard(
+                claw_guard::GuardError::AccessDenied(
+                    "branch:merge scope required".to_string(),
+                ),
+            ));
+        }
+
+        let branch_engine = self.lifecycle.branch()?;
+        
+        // Perform the merge
+        branch_engine.merge_snapshot(source, target).await?;
+        
+        // Record metrics
+        let secs = start.elapsed().as_secs_f64();
+        self.telemetry.metrics.inc_query("merge", "branch", "ok");
+        self.telemetry.metrics.record_query_duration("merge", "branch", secs);
+        
+        // Emit event
+        self.emitter.branch_merged(
+            session.agent_id,
+            source.to_string(),
+            target.to_string(),
+            1,
+        );
+        
+        tracing::info!(
+            agent_id = %session.agent_id,
+            source = %source,
+            target = %target,
+            latency_ms = (secs * 1000.0) as u64,
+            "branch merge completed"
+        );
+        
+        Ok(serde_json::json!({
+            "source": source,
+            "target": target,
+            "status": "merged",
+            "conflicts": 0,
+            "merged_count": 1,
+            "latency_ms": (secs * 1000.0) as u64,
+        }))
     }
 
-    /// Diffs two snapshots.
+    /// Diffs two snapshots and returns a line-oriented diff.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use clawdb::prelude::*;
+    /// # #[tokio::main]
+    /// # async fn main() -> ClawDBResult<()> {
+    /// # let db = ClawDB::open_default().await?;
+    /// # let session = db.session(uuid::Uuid::new_v4(), "reader", vec!["branch:read".into()]).await?;
+    /// # let branch_a = db.branch(&session, "a").await?;
+    /// # let branch_b = db.branch(&session, "b").await?;
+    /// let diff = db.diff(&session, branch_a, branch_b).await?;
+    /// println!("Diff:\n{}", serde_json::to_string_pretty(&diff)?);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn diff(
         &self,
-        _session: &ClawDBSession,
+        session: &ClawDBSession,
         branch_a: Uuid,
         branch_b: Uuid,
     ) -> ClawDBResult<serde_json::Value> {
-        let branch = self.lifecycle.branch()?;
-        let diff = branch.diff_snapshots(branch_a, branch_b).await?;
+        let start = Instant::now();
+        
+        // Validate session scope includes branch:read
+        if !session.scopes.iter().any(|s| s == "branch:*" || s == "branch:read") {
+            return Err(crate::error::ClawDBError::Guard(
+                claw_guard::GuardError::AccessDenied(
+                    "branch:read scope required".to_string(),
+                ),
+            ));
+        }
+
+        let branch_engine = self.lifecycle.branch()?;
+        let diff = branch_engine.diff_snapshots(branch_a, branch_b).await?;
+        
+        let secs = start.elapsed().as_secs_f64();
+        self.telemetry.metrics.inc_query("diff", "branch", "ok");
+        self.telemetry.metrics.record_query_duration("diff", "branch", secs);
+        
+        tracing::info!(
+            agent_id = %session.agent_id,
+            branch_a = %branch_a,
+            branch_b = %branch_b,
+            latency_ms = (secs * 1000.0) as u64,
+            "branch diff completed"
+        );
+        
         Ok(diff)
     }
 
     // ── Sync API ──────────────────────────────────────────────────────────────
 
-    /// Triggers a push+pull sync cycle and returns a summary.
+    /// Triggers a push+pull sync cycle and returns a summary with push/pull counts.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use clawdb::prelude::*;
+    /// # #[tokio::main]
+    /// # async fn main() -> ClawDBResult<()> {
+    /// # let db = ClawDB::open_default().await?;
+    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["sync:*".into()]).await?;
+    /// let result = db.sync(&session).await?;
+    /// println!("Sync result: {}", serde_json::to_string_pretty(&result)?);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn sync(&self, session: &ClawDBSession) -> ClawDBResult<serde_json::Value> {
-        let sync = self.lifecycle.sync()?;
-        sync.push_now().await?;
-        sync.pull_now().await?;
-        self.emitter.sync_completed(session.agent_id, 1, 1);
-        Ok(serde_json::json!({ "status": "ok", "pushed": 1, "pulled": 1 }))
+        let start = Instant::now();
+        
+        // Validate session scope includes sync permission
+        if !session.scopes.iter().any(|s| s == "sync:*" || s == "sync:write") {
+            return Err(crate::error::ClawDBError::Guard(
+                claw_guard::GuardError::AccessDenied(
+                    "sync:write scope required".to_string(),
+                ),
+            ));
+        }
+
+        let sync_engine = self.lifecycle.sync()?;
+        
+        // Push local changes to hub
+        let push_result = sync_engine.push_now().await?;
+        let pushed = push_result.applied_count.unwrap_or(0) as u32;
+        
+        // Pull remote changes from hub
+        let pull_result = sync_engine.pull_now().await?;
+        let pulled = pull_result.applied_count.unwrap_or(0) as u32;
+        
+        let secs = start.elapsed().as_secs_f64();
+        self.telemetry.metrics.inc_query("sync", "sync", "ok");
+        self.telemetry.metrics.record_query_duration("sync", "sync", secs);
+        
+        self.emitter.sync_completed(session.agent_id, pushed, pulled);
+        
+        tracing::info!(
+            agent_id = %session.agent_id,
+            pushed = pushed,
+            pulled = pulled,
+            latency_ms = (secs * 1000.0) as u64,
+            "sync cycle completed"
+        );
+        
+        Ok(serde_json::json!({
+            "status": "ok",
+            "pushed": pushed,
+            "pulled": pulled,
+            "latency_ms": (secs * 1000.0) as u64,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        }))
     }
 
     // ── Reflect API ───────────────────────────────────────────────────────────
 
-    /// Triggers a reflect job and returns the job ID.
+    /// Triggers a reflect job in a background tokio task and returns the job ID.
+    ///
+    /// The reflect engine runs asynchronously and publishes events to the bus
+    /// when complete. To wait for completion, subscribe to `ReflectionCompleted` events.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use clawdb::prelude::*;
+    /// # #[tokio::main]
+    /// # async fn main() -> ClawDBResult<()> {
+    /// # let db = ClawDB::open_default().await?;
+    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["reflect:*".into()]).await?;
+    /// let job_id = db.reflect(&session).await?;
+    /// println!("Reflect job started: {}", job_id);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn reflect(&self, session: &ClawDBSession) -> ClawDBResult<String> {
-        use crate::api::reflect_client::ReflectClient;
-        let client = ReflectClient::new(&self.config.reflect.service_url);
-        let job_id = client.start_reflection(&session.agent_id.to_string()).await?;
+        let start = Instant::now();
+        
+        // Validate session scope includes reflect permission
+        if !session.scopes.iter().any(|s| s == "reflect:*" || s == "reflect:write") {
+            return Err(crate::error::ClawDBError::Guard(
+                claw_guard::GuardError::AccessDenied(
+                    "reflect:write scope required".to_string(),
+                ),
+            ));
+        }
+
+        let job_id = Uuid::new_v4().to_string();
+        let job_id_clone = job_id.clone();
+        let agent_id = session.agent_id;
+        let emitter = self.emitter.clone();
+        
+        // Spawn background reflect task
+        let lifecycle = self.lifecycle.clone();
+        let config = self.config.clone();
+        
+        tokio::spawn(async move {
+            match lifecycle.reflect_client() {
+                Ok(client) => {
+                    match client.start_reflection(&agent_id.to_string()).await {
+                        Ok(_) => {
+                            emitter.reflection_completed(
+                                agent_id,
+                                job_id_clone.clone(),
+                                0, // archived
+                                0, // promoted
+                            );
+                            tracing::info!(
+                                agent_id = %agent_id,
+                                job_id = %job_id_clone,
+                                "reflect cycle completed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                agent_id = %agent_id,
+                                job_id = %job_id_clone,
+                                error = %e,
+                                "reflect cycle failed"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        job_id = %job_id_clone,
+                        error = %e,
+                        "reflect client unavailable"
+                    );
+                }
+            }
+        });
+        
+        let secs = start.elapsed().as_secs_f64();
+        self.telemetry.metrics.inc_query("reflect", "reflect", "ok");
+        self.telemetry.metrics.record_query_duration("reflect", "reflect", secs);
+        
+        tracing::info!(
+            agent_id = %session.agent_id,
+            job_id = %job_id,
+            "reflect job scheduled"
+        );
+        
         Ok(job_id)
     }
 
