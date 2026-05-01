@@ -32,6 +32,11 @@ arc-swap.workspace = true
 futures.workspace = true
 tokio-stream.workspace = true
 backoff.workspace = true
+prometheus-client.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+libloading.workspace = true
 
 claw-core = { path = "../../claw-core" }
 claw-vector = { path = "../../claw-vector" }
@@ -53,3 +58,8 @@ tonic-build = "0.12"
 tempfile = "3"
 tokio-test = "0.4"
 rstest = "0.21"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "runtime_bench"
+harness = false
