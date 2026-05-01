@@ -1,37 +1,50 @@
-//! `clawdb status` — prints runtime health and statistics.
+//! `clawdb status` — component health/status view.
+
+use std::path::PathBuf;
 
 use clap::Args;
+use clawdb::{ClawDB, ClawDBResult};
 
-/// Arguments for the `status` command.
-#[derive(Debug, Args)]
-pub struct StatusArgs {
-    /// Output in JSON format.
-    #[arg(long)]
-    pub json: bool,
-}
+use super::output_json;
 
-/// Executes the `status` command.
-pub async fn run(_data_dir: &std::path::Path, args: &StatusArgs) -> anyhow::Result<()> {
-    // In a real implementation this would connect to the running daemon via gRPC.
-    let status = serde_json::json!({
-        "ok": true,
-        "components": {
-            "core": "healthy",
-            "vector": "healthy",
-            "guard": "healthy",
-            "branch": "healthy",
-            "sync": "unknown",
-            "reflect": "unknown",
-        }
-    });
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&status)?);
+#[derive(Debug, Clone, Args)]
+pub struct StatusArgs {}
+
+pub async fn run(_args: StatusArgs, data_dir: PathBuf) -> ClawDBResult<()> {
+    let db = ClawDB::open(&data_dir).await?;
+    let report = db.health().await?;
+    let ok = matches!(report.overall, clawdb::HealthStatus::Healthy);
+
+    if output_json() {
+        let components = report
+            .components
+            .iter()
+            .map(|(name, c)| {
+                (
+                    name.clone(),
+                    serde_json::json!({
+                        "status": format!("{:?}", c.status),
+                        "latency_ms": c.latency_ms,
+                        "error": c.last_error,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": ok,
+                "uptime_secs": db.uptime_secs(),
+                "components": components,
+            }))?
+        );
     } else {
-        println!("ClawDB status: OK");
-        println!("  core    : healthy");
-        println!("  vector  : healthy");
-        println!("  guard   : healthy");
-        println!("  branch  : healthy");
+        println!("ClawDB status: {}", if ok { "OK" } else { "DEGRADED" });
+        println!("Uptime: {}s", db.uptime_secs());
+        for (name, c) in report.components {
+            println!("  {:<10}: {:?}", name, c.status);
+        }
     }
-    Ok(())
+
+    db.close().await
 }

@@ -1,45 +1,77 @@
-//! `clawdb remember` — stores a memory entry into ClawDB.
+//! `clawdb remember` — store memory content.
+
+use std::path::PathBuf;
 
 use clap::Args;
+use clawdb::{ClawDB, ClawDBResult};
+use uuid::Uuid;
 
-/// Arguments for the `remember` command.
-#[derive(Debug, Args)]
+use super::{load_config, output_json};
+
+#[derive(Debug, Clone, Args)]
 pub struct RememberArgs {
-    /// Content to store.
-    pub content: String,
-    /// Memory type label.
-    #[arg(long, default_value = "general")]
+    #[arg(index = 1, required_unless_present = "content")]
+    pub positional_content: Option<String>,
+    #[arg(long)]
+    pub content: Option<String>,
+    #[arg(long = "type", default_value = "context")]
     pub memory_type: String,
-    /// Comma-separated tags.
     #[arg(long)]
     pub tags: Option<String>,
-    /// Agent ID (defaults to the configured agent).
     #[arg(long)]
-    pub agent_id: Option<uuid::Uuid>,
+    pub metadata: Option<String>,
+    #[arg(long)]
+    pub agent_id: Option<Uuid>,
+    #[arg(long, default_value = "assistant")]
+    pub role: String,
 }
 
-/// Executes the `remember` command.
-pub async fn run(data_dir: &std::path::Path, args: &RememberArgs) -> anyhow::Result<()> {
-    let cfg = clawdb::ClawDBConfig::load_or_default(data_dir)?;
+pub async fn run(args: RememberArgs, data_dir: PathBuf) -> ClawDBResult<()> {
+    let cfg = load_config(&data_dir)?;
     let agent_id = args.agent_id.unwrap_or(cfg.agent_id);
+    let content = args
+        .content
+        .or(args.positional_content)
+        .unwrap_or_default();
     let tags: Vec<String> = args
         .tags
         .as_deref()
         .unwrap_or("")
         .split(',')
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(ToOwned::to_owned)
         .collect();
+    let metadata = if let Some(raw) = args.metadata.as_deref() {
+        serde_json::from_str(raw)?
+    } else {
+        serde_json::Value::Null
+    };
 
-    let mut engine = clawdb::ClawDBEngine::new(cfg).await?;
-    engine.start().await?;
-
-    let result = engine
-        .remember(agent_id, &args.content, &args.memory_type, &tags)
+    let db = ClawDB::open(&data_dir).await?;
+    let session = db
+        .session(
+            agent_id,
+            &args.role,
+            vec!["memory:write".to_string(), "memory:read".to_string()],
+        )
+        .await?;
+    let res = db
+        .remember_typed(&session, &content, &args.memory_type, &tags, metadata)
         .await?;
 
-    println!("Stored memory: {}", result.memory_id);
-    println!("Importance score: {:.3}", result.importance_score);
-    engine.stop().await?;
-    Ok(())
+    if output_json() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "memory_id": res.memory_id,
+                "memory_type": args.memory_type,
+                "importance_score": res.importance_score,
+            })
+        );
+    } else {
+        println!("Stored memory {} [{}]", res.memory_id, args.memory_type);
+    }
+
+    db.close().await
 }

@@ -1,38 +1,80 @@
-//! `clawdb config` — reads and writes the ClawDB configuration.
+//! `clawdb config` — show/set/validate config.
+
+use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
+use clawdb::{ClawDBConfig, ClawDBError, ClawDBResult};
 
-/// Arguments for the `config` command.
-#[derive(Debug, Args)]
+use super::load_config;
+
+#[derive(Debug, Clone, Args)]
 pub struct ConfigArgs {
     #[command(subcommand)]
-    pub action: ConfigAction,
+    pub command: ConfigCommand,
 }
 
-/// Config sub-actions.
-#[derive(Debug, Subcommand)]
-pub enum ConfigAction {
-    /// Print the effective configuration.
+#[derive(Debug, Clone, Subcommand)]
+pub enum ConfigCommand {
     Show,
-    /// Write the default configuration to the data directory.
-    Init,
+    Set { key: String, value: String },
+    Validate,
 }
 
-/// Executes the `config` command.
-pub async fn run(data_dir: &std::path::Path, args: &ConfigArgs) -> anyhow::Result<()> {
-    match &args.action {
-        ConfigAction::Show => {
-            let cfg = clawdb::ClawDBConfig::load_or_default(data_dir)?;
-            let toml_str = toml::to_string_pretty(&cfg)
-                .map_err(|e| anyhow::anyhow!("serialisation error: {e}"))?;
-            println!("{toml_str}");
+fn mask_secrets(mut cfg: ClawDBConfig) -> ClawDBConfig {
+    if !cfg.guard.jwt_secret.is_empty() {
+        cfg.guard.jwt_secret = "********".to_string();
+    }
+    cfg
+}
+
+pub async fn run(args: ConfigArgs, data_dir: PathBuf) -> ClawDBResult<()> {
+    let mut cfg = load_config(&data_dir)?;
+    let cfg_path = data_dir.join("config.toml");
+
+    match args.command {
+        ConfigCommand::Show => {
+            let masked = mask_secrets(cfg);
+            let raw = toml::to_string_pretty(&masked)
+                .map_err(|e| ClawDBError::Config(e.to_string()))?;
+            println!("{raw}");
         }
-        ConfigAction::Init => {
-            let cfg = clawdb::ClawDBConfig::default_for_dir(data_dir);
-            let path = data_dir.join("config.toml");
-            cfg.save(&path)?;
-            println!("Wrote default config to {}", path.display());
+        ConfigCommand::Set { key, value } => {
+            match key.as_str() {
+                "log_level" => cfg.log_level = value,
+                "log_format" => cfg.log_format = value,
+                "server.grpc_port" => {
+                    cfg.server.grpc_port = value
+                        .parse()
+                        .map_err(|_| ClawDBError::Config("invalid grpc port".to_string()))?
+                }
+                "server.http_port" => {
+                    cfg.server.http_port = value
+                        .parse()
+                        .map_err(|_| ClawDBError::Config("invalid http port".to_string()))?
+                }
+                "telemetry.metrics_port" => {
+                    cfg.telemetry.metrics_port = value
+                        .parse()
+                        .map_err(|_| ClawDBError::Config("invalid metrics port".to_string()))?
+                }
+                "vector.embedding_service_url" => cfg.vector.embedding_service_url = value,
+                "sync.hub_url" => cfg.sync.hub_url = Some(value),
+                "reflect.service_url" => cfg.reflect.service_url = value,
+                "guard.jwt_secret" => cfg.guard.jwt_secret = value,
+                _ => {
+                    return Err(ClawDBError::Config(format!(
+                        "unsupported config key: {key}"
+                    )))
+                }
+            }
+            cfg.save(&cfg_path)?;
+            println!("Updated {}", key);
+        }
+        ConfigCommand::Validate => {
+            let _ = ClawDBConfig::load(&cfg_path)?;
+            println!("Config valid: {}", cfg_path.display());
         }
     }
+
     Ok(())
 }
