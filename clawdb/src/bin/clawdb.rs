@@ -1,9 +1,9 @@
 //! ClawDB command-line entry point.
 
 use clap::{Parser, Subcommand};
-use clawdb::{ClawDBConfig, ClawDBEngine};
 use clawdb::lifecycle::GracefulShutdown;
 use clawdb::telemetry::init_tracing;
+use clawdb::{ClawDBConfig, ClawDBEngine};
 
 #[derive(Parser)]
 #[command(name = "clawdb", about = "ClawDB – the agent memory database", version)]
@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Health => {
             let engine = ClawDBEngine::start_with(config).await?;
-            let report = engine.health().await;
+            let report = engine.health().await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             engine.shutdown().await?;
         }

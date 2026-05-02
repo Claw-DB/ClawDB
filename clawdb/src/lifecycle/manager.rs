@@ -155,7 +155,7 @@ impl ComponentLifecycleManager {
 
     async fn start_reflect(&mut self) {
         let client = ReflectClient::new(
-            self.config.reflect.service_url.clone(),
+            self.config.reflect.base_url.clone(),
             self.config.clone(),
         );
         self.reflect_client = Some(Arc::new(client));

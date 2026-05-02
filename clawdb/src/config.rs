@@ -1,202 +1,265 @@
-//! ClawDBConfig: unified configuration builder for all ClawDB subsystems.
+//! Configuration for the `clawdb` wrapper crate.
 
 use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{ClawDBError, ClawDBResult};
 
-/// Unified top-level ClawDB configuration.
+/// Top-level ClawDB configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ClawDBConfig {
-    /// Root data directory (env: `CLAW_DATA_DIR`, default: `~/.clawdb`).
+    /// Root data directory.
     pub data_dir: PathBuf,
-    /// Workspace identifier (env: `CLAW_WORKSPACE_ID`).
+    /// Stable workspace identifier.
     pub workspace_id: Uuid,
-    /// Agent identifier; auto-generated on first run (env: `CLAW_AGENT_ID`).
+    /// Default agent identifier used by local tools.
     pub agent_id: Uuid,
-    /// Log level (env: `CLAW_LOG_LEVEL`, default: `INFO`).
-    #[serde(default = "default_log_level")]
+    /// Log level for tracing.
     pub log_level: String,
-    /// Log format: `pretty` or `json` (env: `CLAW_LOG_FORMAT`, default: `pretty`).
-    #[serde(default = "default_log_format")]
+    /// Log format, usually `json` or `console`.
     pub log_format: String,
-
-    /// Configuration for the claw-core storage engine.
-    pub core: CoreSubConfig,
-    /// Configuration for the claw-vector semantic index.
-    pub vector: VectorSubConfig,
-    /// Configuration for the claw-sync engine.
-    pub sync: SyncSubConfig,
-    /// Configuration for the claw-branch engine.
-    pub branch: BranchSubConfig,
-    /// Configuration for the claw-guard security engine.
-    pub guard: GuardSubConfig,
-    /// Configuration for the claw-reflect microservice.
-    pub reflect: ReflectSubConfig,
-    /// gRPC / HTTP server configuration.
-    pub server: ServerSubConfig,
-    /// Plugin system configuration.
-    pub plugins: PluginsSubConfig,
+    /// Embedded storage configuration.
+    pub core: CoreConfig,
+    /// Semantic search configuration.
+    pub vector: VectorConfig,
+    /// Branching engine configuration.
+    pub branch: BranchConfig,
+    /// Synchronisation configuration.
+    pub sync: SyncConfig,
+    /// Guard engine configuration.
+    pub guard: GuardConfig,
+    /// Reflection service configuration.
+    pub reflect: ReflectConfig,
+    /// gRPC and HTTP server configuration.
+    pub server: ServerConfig,
+    /// Plugin configuration.
+    pub plugins: PluginsConfig,
     /// Telemetry configuration.
-    pub telemetry: TelemetrySubConfig,
+    pub telemetry: TelemetryConfig,
 }
 
-fn default_log_level() -> String { "INFO".to_string() }
-fn default_log_format() -> String { "pretty".to_string() }
-
-/// Configuration for the claw-core SQLite storage engine.
+/// Storage configuration used to build `claw_core::ClawConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoreSubConfig {
-    /// Path to the SQLite database file.
-    pub database_path: PathBuf,
+#[serde(default)]
+pub struct CoreConfig {
+    /// SQLite database path.
+    pub db_path: PathBuf,
+    /// Connection pool size.
+    pub max_connections: u32,
     /// Whether WAL mode is enabled.
-    #[serde(default = "default_true")]
     pub wal_enabled: bool,
-    /// In-memory page cache size in megabytes.
-    #[serde(default = "default_cache_mb")]
-    pub cache_size_mb: u32,
+    /// In-memory cache size in MiB.
+    pub cache_size_mb: usize,
 }
 
-/// Configuration for the claw-vector HNSW index.
+/// Vector engine configuration used to build `claw_vector::VectorConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VectorSubConfig {
-    /// Path to the vector index file.
-    pub index_path: PathBuf,
-    /// URL of the embedding microservice.
-    #[serde(default = "default_embedding_url")]
+#[serde(default)]
+pub struct VectorConfig {
+    /// Whether semantic indexing is enabled.
+    pub enabled: bool,
+    /// SQLite metadata path for vectors.
+    pub db_path: PathBuf,
+    /// Index directory for vector files.
+    pub index_dir: PathBuf,
+    /// Embedding service URL.
     pub embedding_service_url: String,
-    /// Vector dimensionality.
-    #[serde(default = "default_dimensions")]
-    pub dimensions: usize,
+    /// Default embedding dimensions.
+    pub default_dimensions: usize,
 }
 
-/// Configuration for the claw-sync engine.
+/// Branch engine configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncSubConfig {
-    /// Optional hub URL; if absent, sync is disabled.
-    pub hub_url: Option<String>,
-    /// Sync interval in seconds.
-    #[serde(default = "default_sync_interval")]
-    pub sync_interval_secs: u64,
-    /// Path to the device identity key file.
-    pub device_identity_path: PathBuf,
-}
-
-/// Configuration for the claw-branch fork/merge engine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BranchSubConfig {
-    /// Directory that holds branch snapshots.
+#[serde(default)]
+pub struct BranchConfig {
+    /// Branch snapshot directory.
     pub branches_dir: PathBuf,
-    /// Name of the trunk/main branch.
-    #[serde(default = "default_trunk")]
-    pub trunk_name: String,
+    /// Branch registry database path.
+    pub registry_db_path: PathBuf,
+    /// Maximum branches per workspace.
+    pub max_branches_per_workspace: usize,
+    /// Background garbage-collection interval.
+    pub gc_interval_secs: u64,
+    /// Canonical trunk branch name.
+    pub trunk_branch_name: String,
 }
 
-/// Configuration for the claw-guard security engine.
+/// Sync engine configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GuardSubConfig {
-    /// Optional guard database URL.
-    pub database_url: Option<String>,
+#[serde(default)]
+pub struct SyncConfig {
+    /// Optional sync hub URL. When absent, wrapper sync runs in local-only mode.
+    pub hub_url: Option<String>,
+    /// Data directory for sync artefacts.
+    pub data_dir: PathBuf,
+    /// Local SQLite path exposed to claw-sync.
+    pub db_path: PathBuf,
+    /// Background sync interval.
+    pub sync_interval_secs: u64,
+    /// Whether TLS is enabled.
+    pub tls_enabled: bool,
+    /// Connection timeout in seconds.
+    pub connect_timeout_secs: u64,
+    /// Request timeout in seconds.
+    pub request_timeout_secs: u64,
+    /// Maximum delta rows extracted in a sync pass.
+    pub max_delta_rows: usize,
+    /// Maximum chunk size for outbound payloads.
+    pub max_chunk_bytes: usize,
+    /// Maximum pull chunks requested per round.
+    pub max_pull_chunks: u32,
+    /// Maximum in-flight push requests.
+    pub max_push_inflight: usize,
+}
+
+/// Guard engine configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuardConfig {
+    /// SQLite path for the guard database.
+    pub db_path: String,
     /// JWT signing secret.
-    #[serde(default = "default_jwt_secret")]
     pub jwt_secret: String,
-    /// Directory containing Rego / policy files.
+    /// Policy directory.
     pub policy_dir: PathBuf,
+    /// Sensitive resources that increase risk scoring.
+    pub sensitive_resources: Vec<String>,
+    /// Audit flush interval in milliseconds.
+    pub audit_flush_interval_ms: u64,
+    /// Audit batch size.
+    pub audit_batch_size: usize,
+    /// TLS certificate path for guard server mode.
+    pub tls_cert_path: PathBuf,
+    /// TLS key path for guard server mode.
+    pub tls_key_path: PathBuf,
 }
 
-/// Configuration for the claw-reflect Python microservice.
+/// Reflection service configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReflectSubConfig {
-    /// Base URL of the reflect HTTP service.
-    #[serde(default = "default_reflect_url")]
-    pub service_url: String,
-    /// How often (in seconds) to poll for job status.
-    #[serde(default = "default_reflect_poll")]
-    pub poll_interval_secs: u64,
+#[serde(default)]
+pub struct ReflectConfig {
+    /// Optional service URL.
+    #[serde(alias = "service_url")]
+    pub base_url: Option<String>,
+    /// Optional API key.
+    pub api_key: Option<String>,
 }
 
-/// gRPC and HTTP server configuration.
+/// Server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerSubConfig {
-    /// gRPC listen port.
-    #[serde(default = "default_grpc_port")]
+#[serde(default)]
+pub struct ServerConfig {
+    /// gRPC port.
     pub grpc_port: u16,
-    /// HTTP listen port.
-    #[serde(default = "default_http_port")]
+    /// HTTP port.
     pub http_port: u16,
-    /// Path to the TLS certificate file.
-    pub tls_cert_path: Option<PathBuf>,
-    /// Path to the TLS private key file.
-    pub tls_key_path: Option<PathBuf>,
-    /// Maximum number of simultaneous connections.
-    #[serde(default = "default_max_connections")]
-    pub max_connections: usize,
 }
 
-/// Plugin system configuration.
+/// Plugin configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginsSubConfig {
-    /// Directory that contains plugin `.so`/`.dylib` files.
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Plugin directory.
     pub plugins_dir: PathBuf,
-    /// List of plugin names to load at startup.
-    #[serde(default)]
+    /// Enabled plugin names.
     pub enabled: Vec<String>,
-    /// Whether to enforce the plugin sandbox.
-    #[serde(default = "default_true")]
+    /// Whether sandboxing is enabled.
     pub sandbox_enabled: bool,
 }
 
-/// Observability and telemetry configuration.
+/// Telemetry configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetrySubConfig {
-    /// Prometheus metrics scrape port.
-    #[serde(default = "default_metrics_port")]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Prometheus scrape port.
     pub metrics_port: u16,
-    /// Optional OpenTelemetry Collector endpoint.
-    pub otlp_endpoint: Option<String>,
-    /// Service name emitted in traces.
-    #[serde(default = "default_service_name")]
+    /// Optional OTLP endpoint.
+    pub otel_endpoint: Option<String>,
+    /// Service name to emit in telemetry.
     pub service_name: String,
 }
 
-// ── Default helpers ──────────────────────────────────────────────────────────
-
-fn default_true() -> bool { true }
-fn default_cache_mb() -> u32 { 64 }
-fn default_embedding_url() -> String { "http://localhost:8001".to_string() }
-fn default_dimensions() -> usize { 1536 }
-fn default_sync_interval() -> u64 { 300 }
-fn default_trunk() -> String { "trunk".to_string() }
-fn default_jwt_secret() -> String { "change-me-in-production".to_string() }
-fn default_reflect_url() -> String { "http://localhost:8002".to_string() }
-fn default_reflect_poll() -> u64 { 60 }
-fn default_grpc_port() -> u16 { 50050 }
-fn default_http_port() -> u16 { 8080 }
-fn default_max_connections() -> usize { 1000 }
-fn default_metrics_port() -> u16 { 9090 }
-fn default_service_name() -> String { "clawdb".to_string() }
-
-// ── Implementation ───────────────────────────────────────────────────────────
-
 impl ClawDBConfig {
-    /// Deserialises a `ClawDBConfig` from a TOML file at `path`.
-    pub fn load(path: &Path) -> ClawDBResult<Self> {
-        let raw = std::fs::read_to_string(path)?;
-        toml::from_str(&raw).map_err(|e| ClawDBError::Config(e.to_string()))
-    }
-
-    /// Serialises this config to a TOML file at `path`.
-    pub fn save(&self, path: &Path) -> ClawDBResult<()> {
-        let raw = toml::to_string_pretty(self).map_err(|e| ClawDBError::Config(e.to_string()))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    /// Creates a default config rooted at `data_dir`.
+    pub fn default_for_dir(data_dir: &Path) -> Self {
+        let host = host_identity();
+        let workspace_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, host.as_bytes());
+        let agent_seed = format!("{host}:agent");
+        let agent_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, agent_seed.as_bytes());
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            workspace_id,
+            agent_id,
+            log_level: "info".to_string(),
+            log_format: "json".to_string(),
+            core: CoreConfig {
+                db_path: data_dir.join("claw.db"),
+                max_connections: 10,
+                wal_enabled: true,
+                cache_size_mb: 64,
+            },
+            vector: VectorConfig {
+                enabled: true,
+                db_path: data_dir.join("claw_vector.db"),
+                index_dir: data_dir.join("claw_vector_indices"),
+                embedding_service_url: "http://localhost:50051".to_string(),
+                default_dimensions: 384,
+            },
+            branch: BranchConfig {
+                branches_dir: data_dir.join("branches"),
+                registry_db_path: data_dir.join("branches").join("branch_registry.db"),
+                max_branches_per_workspace: 50,
+                gc_interval_secs: 3600,
+                trunk_branch_name: "trunk".to_string(),
+            },
+            sync: SyncConfig {
+                hub_url: None,
+                data_dir: data_dir.join("sync"),
+                db_path: data_dir.join("claw.db"),
+                sync_interval_secs: 30,
+                tls_enabled: false,
+                connect_timeout_secs: 10,
+                request_timeout_secs: 30,
+                max_delta_rows: 1000,
+                max_chunk_bytes: 64 * 1024,
+                max_pull_chunks: 128,
+                max_push_inflight: 4,
+            },
+            guard: GuardConfig {
+                db_path: data_dir.join("claw_guard.db").display().to_string(),
+                jwt_secret: "change-me".to_string(),
+                policy_dir: data_dir.join("policies"),
+                sensitive_resources: vec!["memory".to_string(), "branch".to_string()],
+                audit_flush_interval_ms: 100,
+                audit_batch_size: 500,
+                tls_cert_path: data_dir.join("certs").join("server.crt"),
+                tls_key_path: data_dir.join("certs").join("server.key"),
+            },
+            reflect: ReflectConfig {
+                base_url: None,
+                api_key: None,
+            },
+            server: ServerConfig {
+                grpc_port: 50050,
+                http_port: 8080,
+            },
+            plugins: PluginsConfig {
+                plugins_dir: data_dir.join("plugins"),
+                enabled: Vec::new(),
+                sandbox_enabled: true,
+            },
+            telemetry: TelemetryConfig {
+                metrics_port: 9090,
+                otel_endpoint: None,
+                service_name: "clawdb".to_string(),
+            },
         }
-        std::fs::write(path, raw)?;
-        Ok(())
     }
 
-    /// Builds a config from `CLAW_*` environment variables, using defaults where absent.
+    /// Builds configuration from environment variables.
     pub fn from_env() -> ClawDBResult<Self> {
         let data_dir = std::env::var("CLAW_DATA_DIR")
             .map(PathBuf::from)
@@ -205,135 +268,184 @@ impl ClawDBConfig {
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join(".clawdb")
             });
-
-        let workspace_id = std::env::var("CLAW_WORKSPACE_ID")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(Uuid::new_v4);
-
-        let agent_id = std::env::var("CLAW_AGENT_ID")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(Uuid::new_v4);
-
-        let log_level = std::env::var("CLAW_LOG_LEVEL").unwrap_or_else(|_| "INFO".to_string());
-        let log_format = std::env::var("CLAW_LOG_FORMAT").unwrap_or_else(|_| "pretty".to_string());
-
-        let mut cfg = Self::default_for_dir(&data_dir);
-        cfg.workspace_id = workspace_id;
-        cfg.agent_id = agent_id;
-        cfg.log_level = log_level;
-        cfg.log_format = log_format;
-        Ok(cfg)
+        let mut config = Self::default_for_dir(&data_dir);
+        apply_env_overrides(&mut config)?;
+        if std::env::var("CLAW_GUARD_JWT_SECRET").is_err() && config.guard.jwt_secret == "change-me"
+        {
+            return Err(ClawDBError::Config(
+                "CLAW_GUARD_JWT_SECRET is required".to_string(),
+            ));
+        }
+        Ok(config)
     }
 
-    /// Loads from `data_dir/config.toml` if it exists; otherwise returns the default config.
+    /// Loads configuration from a TOML file and then applies environment overrides.
+    pub fn from_file(path: &Path) -> ClawDBResult<Self> {
+        let raw = std::fs::read_to_string(path)?;
+        let mut config: Self =
+            toml::from_str(&raw).map_err(|error| ClawDBError::Config(error.to_string()))?;
+        if config.data_dir.as_os_str().is_empty() {
+            config.data_dir = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+        }
+        apply_env_overrides(&mut config)?;
+        if config.guard.jwt_secret.trim().is_empty() || config.guard.jwt_secret == "change-me" {
+            return Err(ClawDBError::Config(
+                "CLAW_GUARD_JWT_SECRET is required".to_string(),
+            ));
+        }
+        Ok(config)
+    }
+
+    /// Loads configuration from disk or falls back to defaults.
     pub fn load_or_default(data_dir: &Path) -> ClawDBResult<Self> {
-        let cfg_path = data_dir.join("config.toml");
-        if cfg_path.exists() {
-            Self::load(&cfg_path)
+        let path = data_dir.join("config.toml");
+        if path.exists() {
+            Self::from_file(&path)
         } else {
             Ok(Self::default_for_dir(data_dir))
         }
     }
 
-    /// Creates a default config with all sub-config paths rooted at `data_dir`.
-    pub fn default_for_dir(data_dir: &Path) -> Self {
-        Self {
-            data_dir: data_dir.to_path_buf(),
-            workspace_id: Uuid::new_v4(),
-            agent_id: Uuid::new_v4(),
-            log_level: default_log_level(),
-            log_format: default_log_format(),
-            core: CoreSubConfig {
-                database_path: data_dir.join("core.db"),
-                wal_enabled: true,
-                cache_size_mb: 64,
-            },
-            vector: VectorSubConfig {
-                index_path: data_dir.join("vector.idx"),
-                embedding_service_url: default_embedding_url(),
-                dimensions: 1536,
-            },
-            sync: SyncSubConfig {
-                hub_url: None,
-                sync_interval_secs: 300,
-                device_identity_path: data_dir.join("device.key"),
-            },
-            branch: BranchSubConfig {
-                branches_dir: data_dir.join("branches"),
-                trunk_name: "trunk".to_string(),
-            },
-            guard: GuardSubConfig {
-                database_url: None,
-                jwt_secret: default_jwt_secret(),
-                policy_dir: data_dir.join("policies"),
-            },
-            reflect: ReflectSubConfig {
-                service_url: default_reflect_url(),
-                poll_interval_secs: 60,
-            },
-            server: ServerSubConfig {
-                grpc_port: 50050,
-                http_port: 8080,
-                tls_cert_path: None,
-                tls_key_path: None,
-                max_connections: 1000,
-            },
-            plugins: PluginsSubConfig {
-                plugins_dir: data_dir.join("plugins"),
-                enabled: vec![],
-                sandbox_enabled: true,
-            },
-            telemetry: TelemetrySubConfig {
-                metrics_port: 9090,
-                otlp_endpoint: None,
-                service_name: "clawdb".to_string(),
-            },
-        }
+    /// Loads configuration from disk without environment overrides.
+    pub fn load(path: &Path) -> ClawDBResult<Self> {
+        let raw = std::fs::read_to_string(path)?;
+        toml::from_str(&raw).map_err(|error| ClawDBError::Config(error.to_string()))
     }
 
-    /// Converts this config into a `claw_core::ClawConfig`.
-    pub fn into_core_config(&self) -> claw_core::ClawConfig {
-        claw_core::ClawConfig {
-            database_path: self.core.database_path.clone(),
-            wal_enabled: self.core.wal_enabled,
-            cache_size_mb: self.core.cache_size_mb,
+    /// Saves this config as pretty TOML.
+    pub fn save(&self, path: &Path) -> ClawDBResult<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        let raw =
+            toml::to_string_pretty(self).map_err(|error| ClawDBError::Config(error.to_string()))?;
+        std::fs::write(path, raw)?;
+        Ok(())
     }
+}
 
-    /// Converts this config into a `claw_vector::VectorConfig`.
-    pub fn into_vector_config(&self) -> claw_vector::VectorConfig {
-        claw_vector::VectorConfig {
-            index_path: self.vector.index_path.clone(),
-            embedding_service_url: self.vector.embedding_service_url.clone(),
-            dimensions: self.vector.dimensions,
-        }
+impl Default for ClawDBConfig {
+    fn default() -> Self {
+        Self::default_for_dir(
+            &dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".clawdb"),
+        )
     }
+}
 
-    /// Converts this config into a `claw_sync::SyncConfig`.
-    pub fn into_sync_config(&self) -> claw_sync::SyncConfig {
-        claw_sync::SyncConfig {
-            hub_url: self.sync.hub_url.clone(),
-            sync_interval_secs: self.sync.sync_interval_secs,
-            device_identity_path: self.sync.device_identity_path.clone(),
-        }
+impl Default for CoreConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().core
     }
+}
 
-    /// Converts this config into a `claw_branch::BranchConfig`.
-    pub fn into_branch_config(&self) -> claw_branch::BranchConfig {
-        claw_branch::BranchConfig {
-            branches_dir: self.branch.branches_dir.clone(),
-            trunk_name: self.branch.trunk_name.clone(),
-        }
+impl Default for VectorConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().vector
     }
+}
 
-    /// Converts this config into a `claw_guard::GuardConfig`.
-    pub fn into_guard_config(&self) -> claw_guard::GuardConfig {
-        claw_guard::GuardConfig {
-            database_url: self.guard.database_url.clone(),
-            jwt_secret: self.guard.jwt_secret.clone(),
-            policy_dir: self.guard.policy_dir.clone(),
-        }
+impl Default for BranchConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().branch
     }
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().sync
+    }
+}
+
+impl Default for GuardConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().guard
+    }
+}
+
+impl Default for ReflectConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().reflect
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().server
+    }
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().plugins
+    }
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        ClawDBConfig::default().telemetry
+    }
+}
+
+fn apply_env_overrides(config: &mut ClawDBConfig) -> ClawDBResult<()> {
+    if let Ok(value) = std::env::var("CLAW_DATA_DIR") {
+        config.data_dir = PathBuf::from(value);
+    }
+    if let Ok(value) = std::env::var("CLAW_WORKSPACE_ID") {
+        config.workspace_id = parse_uuid(&value, "CLAW_WORKSPACE_ID")?;
+    }
+    if let Ok(value) = std::env::var("CLAW_AGENT_ID") {
+        config.agent_id = parse_uuid(&value, "CLAW_AGENT_ID")?;
+    }
+    if let Ok(value) = std::env::var("CLAW_LOG_LEVEL") {
+        config.log_level = value;
+    }
+    if let Ok(value) = std::env::var("CLAW_LOG_FORMAT") {
+        config.log_format = value;
+    }
+    if let Ok(value) = std::env::var("CLAW_VECTOR_BASE_URL") {
+        config.vector.embedding_service_url = value;
+    }
+    if let Ok(value) = std::env::var("CLAW_VECTOR_ENABLED") {
+        config.vector.enabled = parse_bool(&value)?;
+    }
+    if let Ok(value) = std::env::var("CLAW_SYNC_HUB_URL") {
+        config.sync.hub_url = Some(value);
+    }
+    if let Ok(value) = std::env::var("CLAW_GUARD_JWT_SECRET") {
+        config.guard.jwt_secret = value;
+    }
+    if let Ok(value) = std::env::var("CLAW_GUARD_POLICY_DIR") {
+        config.guard.policy_dir = PathBuf::from(value);
+    }
+    if let Ok(value) = std::env::var("CLAW_REFLECT_BASE_URL") {
+        config.reflect.base_url = Some(value);
+    }
+    if let Ok(value) = std::env::var("CLAW_REFLECT_API_KEY") {
+        config.reflect.api_key = Some(value);
+    }
+    Ok(())
+}
+
+fn parse_uuid(value: &str, name: &str) -> ClawDBResult<Uuid> {
+    Uuid::parse_str(value).map_err(|error| ClawDBError::Config(format!("invalid {name}: {error}")))
+}
+
+fn parse_bool(value: &str) -> ClawDBResult<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(ClawDBError::Config(format!("invalid boolean: {value}"))),
+    }
+}
+
+fn host_identity() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "clawdb-local".to_string())
 }

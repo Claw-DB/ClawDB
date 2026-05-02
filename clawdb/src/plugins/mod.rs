@@ -1,13 +1,9 @@
-//! Plugin system: loading, sandboxing, and invoking extension plugins.
+//! Minimal plugin system.
 
+pub mod events;
 pub mod interface;
-pub mod loader;
-pub mod registry;
-pub mod sandbox;
-pub mod traits;
+pub mod manager;
 
-pub use interface::{ClawPlugin, PluginCapability, PluginContext, PluginManifest};
-pub use loader::PluginLoader;
-pub use registry::PluginRegistry;
-pub use sandbox::PluginSandbox;
-pub use traits::ClawPlugin as LegacyClawPlugin;
+pub use events::ClawEvent;
+pub use interface::ClawPlugin;
+pub use manager::PluginManager;

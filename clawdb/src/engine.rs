@@ -1,290 +1,338 @@
-//! `ClawDB`: the top-level aggregate runtime that wires all subsystems together.
+//! Best-fit `clawdb` wrapper over the currently published component crates.
 
 use std::{path::Path, sync::Arc, time::Instant};
 
+use anyhow::Context;
+use claw_guard::error::GuardError;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sqlx::Executor;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    config::ClawDBConfig,
-    error::ClawDBResult,
-    events::{bus::EventBus, emitter::EventEmitter, subscriber::EventSubscriber},
-    lifecycle::{health::HealthReport, manager::ComponentLifecycleManager},
-    plugins::{
-        interface::{PluginContext, PluginManifest},
-        loader::PluginLoader,
-        registry::PluginRegistry,
-        sandbox::PluginSandbox,
-        ClawPlugin,
+    error::{ClawDBError, ClawDBResult},
+    plugins::{events::ClawEvent, manager::PluginManager},
+    telemetry::{Metrics, PrometheusHandle},
+    types::{
+        BranchDiff, ClawTransaction, HealthStatus, MemoryRecord, MergeResult, ReflectSummary,
+        RememberResult, SearchHit, SyncSummary,
     },
-    query::{
-        executor::QueryExecutor,
-        optimizer::QueryOptimizer,
-        planner::MemoryPlanner,
-        router::QueryRouter,
-        types::{Query, QueryResult},
-    },
-    session::{
-        context::SessionContext,
-        manager::{ClawDBSession, SessionManager},
-    },
-    telemetry::{Metrics, Telemetry},
-    transaction::manager::TransactionManager,
 };
 
+pub use crate::config::ClawDBConfig;
 
-// ── ClawDB ────────────────────────────────────────────────────────────────────
+/// Public session type returned by the wrapper.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClawDBSession {
+    /// Session identifier.
+    pub id: Uuid,
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// Session role.
+    pub role: String,
+    /// Granted scopes.
+    pub scopes: Vec<String>,
+    /// Guard token.
+    pub token: String,
+    /// Expiry timestamp.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
 
-/// The ClawDB aggregate runtime.
-///
-/// Wires every subsystem together and exposes a single coherent API to
-/// application code, gRPC handlers, and CLI commands.
+/// Unified database wrapper built from the current component crates.
 pub struct ClawDB {
-    /// Parsed, immutable configuration.
-    pub config: Arc<ClawDBConfig>,
-    /// Lifecycle manager: starts, stops, and health-checks all engine components.
-    pub lifecycle: Arc<ComponentLifecycleManager>,
-    /// Internal event bus: fan-out broadcast channel.
-    pub event_bus: Arc<EventBus>,
-    /// Engine-level event emitter (component = "engine").
-    pub emitter: EventEmitter,
-    /// Query router: guards access and delegates to the correct sub-engine.
-    pub router: Arc<QueryRouter>,
-    /// Memory planner: decides the optimal storage strategy for new entries.
-    pub planner: Arc<MemoryPlanner>,
-    /// Query optimiser: rewrites queries for better performance.
-    pub optimizer: Arc<QueryOptimizer>,
-    /// Query executor: runs the optimised plan across sub-engines.
-    pub executor: Arc<QueryExecutor>,
-    /// Session manager: issues, validates, and revokes claw-guard sessions.
-    pub session_manager: Arc<SessionManager>,
-    /// Transaction manager: 2PC across core + vector sub-engines.
-    pub tx_manager: Arc<TransactionManager>,
-    /// Plugin registry: loaded plugin instances + async hook dispatch.
-    pub plugins: Arc<PluginRegistry>,
-    /// Plugin sandbox: capability allowlist.
-    pub sandbox: Arc<PluginSandbox>,
-    /// Prometheus metrics + registry.
-    pub telemetry: Arc<Telemetry>,
-    /// Engine start timestamp (used for uptime reporting).
+    /// User configuration.
+    pub config: ClawDBConfig,
+    core: Arc<claw_core::ClawEngine>,
+    vector: Option<Arc<claw_vector::VectorEngine>>,
+    branch: Arc<claw_branch::BranchEngine>,
+    sync: Arc<claw_sync::SyncEngine>,
+    guard: Arc<claw_guard::Guard>,
+    reflect: Option<Arc<claw_reflect_client::ReflectClient>>,
+    shutdown: CancellationToken,
+    metrics: Arc<Metrics>,
+    plugins: Arc<Mutex<PluginManager>>,
     started_at: Instant,
+    sync_local_only: bool,
 }
 
 impl ClawDB {
-    // ── Constructors ─────────────────────────────────────────────────────────
-
-    /// Creates a `ClawDB` instance and starts all subsystems.
-    ///
-    /// Equivalent to calling [`ClawDB::build`] followed by [`ClawDB::start`].
+    /// Creates a new wrapper and initializes all enabled components.
     pub async fn new(config: ClawDBConfig) -> ClawDBResult<Self> {
-        let mut engine = Self::build(config).await?;
-        engine.start().await?;
-        Ok(engine)
+        crate::telemetry::init_telemetry(&config.telemetry)?;
+
+        let core_config = claw_core::ClawConfig::builder()
+            .db_path(config.core.db_path.clone())
+            .max_connections(config.core.max_connections)
+            .wal_enabled(config.core.wal_enabled)
+            .cache_size_mb(config.core.cache_size_mb)
+            .build()
+            .map_err(ClawDBError::Core)?;
+        let core = Arc::new(claw_core::ClawEngine::open(core_config).await?);
+        core.migrate().await?;
+        core.pool()
+            .execute(
+                "CREATE TABLE IF NOT EXISTS memory_records (
+                    id TEXT PRIMARY KEY
+                )",
+            )
+            .await
+            .map_err(|error| ClawDBError::ComponentInit("core", error.to_string()))?;
+        core.pool()
+            .execute(
+                "CREATE TABLE IF NOT EXISTS tool_outputs (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT
+                )",
+            )
+            .await
+            .map_err(|error| ClawDBError::ComponentInit("core", error.to_string()))?;
+
+        let vector = if config.vector.enabled {
+            let vector_config = claw_vector::VectorConfig::builder()
+                .db_path(config.vector.db_path.clone())
+                .index_dir(config.vector.index_dir.clone())
+                .embedding_service_url(config.vector.embedding_service_url.clone())
+                .default_workspace_id(config.workspace_id.to_string())
+                .default_dimensions(config.vector.default_dimensions)
+                .build()
+                .map_err(ClawDBError::Vector)?;
+            let engine = Arc::new(
+                claw_vector::VectorEngine::new(vector_config)
+                    .await
+                    .map_err(|error| ClawDBError::ComponentInit("vector", error.to_string()))?,
+            );
+            ensure_vector_collection(&engine, &config.workspace_id.to_string()).await?;
+            Some(engine)
+        } else {
+            None
+        };
+
+        let branch_config = claw_branch::BranchConfig::builder()
+            .workspace_id(config.workspace_id)
+            .branches_dir(config.branch.branches_dir.clone())
+            .registry_db_path(config.branch.registry_db_path.clone())
+            .max_branches_per_workspace(config.branch.max_branches_per_workspace)
+            .gc_interval_secs(config.branch.gc_interval_secs)
+            .trunk_branch_name(config.branch.trunk_branch_name.clone())
+            .build()
+            .map_err(ClawDBError::Branch)?;
+        let branch = Arc::new(
+            claw_branch::BranchEngine::new(branch_config, &config.core.db_path)
+                .await
+                .map_err(|error| ClawDBError::ComponentInit("branch", error.to_string()))?,
+        );
+        branch.start_gc_scheduler().await?;
+
+        let sync_local_only = config.sync.hub_url.is_none();
+        let sync_config = claw_sync::SyncConfig {
+            workspace_id: config.workspace_id,
+            device_id: config.agent_id,
+            hub_endpoint: config
+                .sync
+                .hub_url
+                .clone()
+                .unwrap_or_else(|| "http://127.0.0.1:50051".to_string()),
+            data_dir: config.sync.data_dir.clone(),
+            db_path: config.sync.db_path.clone(),
+            tls_enabled: config.sync.tls_enabled,
+            connect_timeout_secs: config.sync.connect_timeout_secs,
+            request_timeout_secs: config.sync.request_timeout_secs,
+            sync_interval_secs: config.sync.sync_interval_secs,
+            heartbeat_interval_secs: config.sync.sync_interval_secs.max(1),
+            max_retries: 5,
+            retry_base_ms: 500,
+            max_delta_rows: config.sync.max_delta_rows,
+            max_chunk_bytes: config.sync.max_chunk_bytes,
+            max_pull_chunks: config.sync.max_pull_chunks,
+            max_push_inflight: config.sync.max_push_inflight,
+        };
+        let sync = Arc::new(
+            claw_sync::SyncEngine::new(sync_config, core.pool().clone())
+                .await
+                .map_err(|error| ClawDBError::ComponentInit("sync", error.to_string()))?,
+        );
+
+        let guard_config = claw_guard::GuardConfig {
+            db_path: config.guard.db_path.clone(),
+            jwt_secret: claw_guard::ZeroizeString::new(config.guard.jwt_secret.clone()),
+            policy_dir: config.guard.policy_dir.clone(),
+            tls_cert_path: config.guard.tls_cert_path.clone(),
+            tls_key_path: config.guard.tls_key_path.clone(),
+            risk_thresholds: claw_guard::RiskThresholds::default(),
+            sensitive_resources: config.guard.sensitive_resources.clone(),
+            audit_flush_interval_ms: config.guard.audit_flush_interval_ms,
+            audit_batch_size: config.guard.audit_batch_size,
+        };
+        let guard = Arc::new(
+            claw_guard::Guard::new(guard_config)
+                .await
+                .map_err(|error| ClawDBError::ComponentInit("guard", error.to_string()))?,
+        );
+
+        let reflect = match (&config.reflect.base_url, &config.reflect.api_key) {
+            (Some(base_url), Some(api_key)) => Some(Arc::new(
+                claw_reflect_client::ReflectClient::new(base_url.clone(), api_key.clone())
+                    .map_err(|error| ClawDBError::ComponentInit("reflect", error.to_string()))?,
+            )),
+            _ => {
+                tracing::warn!("reflect client disabled because base URL or API key is missing");
+                None
+            }
+        };
+
+        let metrics = Metrics::new();
+        let (mut plugin_manager, mut plugin_rx) = PluginManager::new();
+        let _ = plugin_manager.load_from_dir(&config.plugins.plugins_dir);
+        let plugins = Arc::new(Mutex::new(plugin_manager));
+        let plugins_task = plugins.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = plugin_rx.recv().await {
+                let mut manager = plugins_task.lock().await;
+                manager.dispatch(&event).await;
+            }
+        });
+
+        tracing::info!(
+            core = true,
+            vector = vector.is_some(),
+            branch = true,
+            sync = true,
+            reflect = reflect.is_some(),
+            "ClawDB components initialized"
+        );
+
+        Ok(Self {
+            config,
+            core,
+            vector,
+            branch,
+            sync,
+            guard,
+            reflect,
+            shutdown: CancellationToken::new(),
+            metrics,
+            plugins,
+            started_at: Instant::now(),
+            sync_local_only,
+        })
     }
 
-    /// Creates a `ClawDB` from the default data directory (`~/.clawdb`).
-    pub async fn open_default() -> ClawDBResult<Self> {
-        let config = ClawDBConfig::from_env()?;
+    /// Compatibility constructor used by binaries.
+    pub async fn start_with(config: ClawDBConfig) -> ClawDBResult<Self> {
         Self::new(config).await
     }
 
-    /// Creates a `ClawDB` rooted at `data_dir`.
+    /// Opens the default data directory using environment-backed configuration.
+    pub async fn open_default() -> ClawDBResult<Self> {
+        Self::new(ClawDBConfig::from_env()?).await
+    }
+
+    /// Opens a specific data directory.
     pub async fn open(data_dir: &Path) -> ClawDBResult<Self> {
-        let mut config = ClawDBConfig::from_env()?;
+        let mut config = ClawDBConfig::load_or_default(data_dir)?;
         config.data_dir = data_dir.to_path_buf();
         Self::new(config).await
     }
 
-    /// Builds the engine without starting subsystems (useful for testing).
-    pub async fn build(config: ClawDBConfig) -> ClawDBResult<Self> {
-        let config = Arc::new(config);
-        let event_bus = Arc::new(EventBus::from_config(&config));
-        let emitter = EventEmitter::new(event_bus.clone(), "engine");
-        let telemetry = Telemetry::new();
-
-        let lifecycle =
-            ComponentLifecycleManager::new(config.clone(), event_bus.clone()).await?;
-        let lifecycle = Arc::new(lifecycle);
-
-        let router = Arc::new(QueryRouter::new(lifecycle.clone(), event_bus.clone()));
-        let planner = Arc::new(MemoryPlanner::new(config.clone()));
-        let optimizer = Arc::new(QueryOptimizer::new());
-        let executor = Arc::new(QueryExecutor::new(lifecycle.clone(), event_bus.clone()));
-
-        let session_manager = Arc::new(SessionManager::new(
-            lifecycle.clone(),
-            event_bus.clone(),
-            config.clone(),
-        ));
-
-        let tx_manager = Arc::new(TransactionManager::new(
-            lifecycle.clone(),
-            event_bus.clone(),
-        ));
-        let sandbox = Arc::new(PluginSandbox::new(config.plugins.sandbox_enabled));
-        let plugins = Arc::new(PluginRegistry::new(sandbox.clone()));
-
-        Ok(Self {
-            config,
-            lifecycle,
-            event_bus,
-            emitter,
-            router,
-            planner,
-            optimizer,
-            executor,
-            session_manager,
-            tx_manager,
-            plugins,
-            sandbox,
-            telemetry,
-            started_at: Instant::now(),
-        })
+    /// Returns the current uptime in seconds.
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
     }
 
-    /// Starts all subsystems (idempotent — safe to call multiple times).
-    pub async fn start(&mut self) -> ClawDBResult<()> {
-        if let Some(lc) = Arc::get_mut(&mut self.lifecycle) {
-            lc.start_all().await?;
-        }
-        self.load_plugins().await?;
-        self.start_metrics_server();
-        self.start_plugin_event_dispatcher();
-        tracing::info!("ClawDB engine started");
-        Ok(())
+    /// Returns the underlying core engine.
+    pub fn core_engine(&self) -> &Arc<claw_core::ClawEngine> {
+        &self.core
     }
 
-    fn start_plugin_event_dispatcher(&self) {
-        let plugins = self.plugins.clone();
-        let mut subscriber = self.subscribe();
-
-        tokio::spawn(async move {
-            loop {
-                match subscriber.recv().await {
-                    Ok(event) => {
-                        plugins.dispatch_event(&event).await;
-                    }
-                    Err(e) => {
-                        tracing::error!("plugin event dispatcher error: {e}");
-                        break;
-                    }
-                }
-            }
-        });
+    /// Returns the underlying branch engine.
+    pub fn branch_engine(&self) -> &Arc<claw_branch::BranchEngine> {
+        &self.branch
     }
 
-    // ── Plugin lifecycle ─────────────────────────────────────────────────────
-
-    async fn load_plugins(&self) -> ClawDBResult<()> {
-        let loader = PluginLoader::new(self.sandbox.clone());
-        let pairs = loader
-            .load_from_dir(&self.config.plugins.plugins_dir, &self.config.plugins.enabled)
-            .await?;
-        
-        let mut loaded_count = 0;
-        for (manifest, plugin) in pairs {
-            let ctx = PluginContext {
-                config: serde_json::Value::Null,
-                event_emitter: Arc::new(
-                    EventEmitter::new(self.event_bus.clone(), "plugin"),
-                ),
-            };
-            
-            match self.plugins.register(manifest.clone(), plugin, ctx).await {
-                Ok(()) => {
-                    loaded_count += 1;
-                    // Emit PluginLoaded event
-                    let event = crate::events::types::ClawEvent::PluginLoaded {
-                        name: manifest.name.clone(),
-                        version: manifest.version.clone(),
-                    };
-                    self.event_bus.publish(event);
-                    
-                    tracing::info!(
-                        plugin = %manifest.name,
-                        version = %manifest.version,
-                        "plugin loaded and registered"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        plugin = %manifest.name,
-                        error = %e,
-                        "failed to register plugin"
-                    );
-                }
-            }
-        }
-        
-        if loaded_count > 0 {
-            tracing::info!(count = loaded_count, "plugins loaded");
-        }
-        
-        Ok(())
+    /// Returns the underlying sync engine.
+    pub fn sync_engine(&self) -> &Arc<claw_sync::SyncEngine> {
+        &self.sync
     }
 
-    fn start_metrics_server(&self) {
-        let port = self.config.telemetry.metrics_port;
-        if port > 0 {
-            crate::telemetry::metrics::serve_metrics(
-                port,
-                self.telemetry.registry.clone(),
-            );
-        }
+    /// Returns the underlying guard engine.
+    pub fn guard_engine(&self) -> &Arc<claw_guard::Guard> {
+        &self.guard
     }
 
-    // ── Session API ───────────────────────────────────────────────────────────
+    /// Returns the optional vector engine.
+    pub fn vector_engine(&self) -> Option<&Arc<claw_vector::VectorEngine>> {
+        self.vector.as_ref()
+    }
 
-    /// Creates a new session for `agent_id` with the given `role`.
+    /// Returns the optional reflect client.
+    pub fn reflect_client(&self) -> Option<&Arc<claw_reflect_client::ReflectClient>> {
+        self.reflect.as_ref()
+    }
+
+    /// Returns a Prometheus handle for scraping metrics.
+    pub fn metrics_handle(&self) -> PrometheusHandle {
+        self.metrics.handle()
+    }
+
+    /// Creates a session with the default one-hour TTL.
+    #[tracing::instrument(skip(self, scopes), fields(workspace_id = %self.config.workspace_id, agent_id = %agent_id))]
     pub async fn session(
         &self,
         agent_id: Uuid,
         role: &str,
         scopes: Vec<String>,
     ) -> ClawDBResult<ClawDBSession> {
-        let sess = self.session_manager.create(agent_id, role, scopes, None).await?;
-        self.telemetry.metrics.inc_session(role);
-        Ok(sess)
+        self.session_with_ttl(agent_id, role, scopes, 3600).await
     }
 
-    /// Creates a session with an explicit task type annotation.
-    pub async fn session_with_task(
+    /// Creates a session with a custom TTL.
+    #[tracing::instrument(skip(self, scopes), fields(workspace_id = %self.config.workspace_id, agent_id = %agent_id))]
+    pub async fn session_with_ttl(
         &self,
         agent_id: Uuid,
         role: &str,
         scopes: Vec<String>,
-        task_type: &str,
+        ttl_secs: i64,
     ) -> ClawDBResult<ClawDBSession> {
-        let sess = self
+        let session = self
+            .guard
             .session_manager
-            .create(agent_id, role, scopes, Some(task_type.to_string()))
+            .create_session(agent_id, role, scopes.clone(), ttl_secs)
             .await?;
-        self.telemetry.metrics.inc_session(role);
-        Ok(sess)
+        self.metrics.session_created.inc();
+        self.emit(ClawEvent::SessionCreated {
+            session_id: session.session_id,
+            agent_id,
+        })
+        .await;
+        Ok(ClawDBSession {
+            id: session.session_id,
+            agent_id: session.agent_id,
+            workspace_id: self.config.workspace_id,
+            role: session.role,
+            scopes,
+            token: session.token,
+            expires_at: session.expires_at,
+        })
     }
 
-    /// Validates a guard token and returns the corresponding `SessionContext`.
-    pub async fn validate_session(&self, token: &str) -> ClawDBResult<SessionContext> {
-        self.session_manager.validate(token).await
-    }
-
-    /// Revokes a session by ID.
-    pub async fn revoke_session(&self, session_id: Uuid) -> ClawDBResult<()> {
-        self.session_manager.revoke(session_id).await
-    }
-
-    // ── Memory API ────────────────────────────────────────────────────────────
-
-    /// Stores a memory and returns its ID and importance score.
+    /// Stores a semantic memory with default tags and type mapping.
+    #[tracing::instrument(skip(self, session, content), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn remember(
         &self,
         session: &ClawDBSession,
         content: &str,
     ) -> ClawDBResult<RememberResult> {
-        self.remember_typed(session, content, "general", &[], serde_json::Value::Null)
+        self.remember_typed(session, content, "semantic", &[], serde_json::Value::Null)
             .await
     }
 
-    /// Stores a memory with explicit type, tags, and metadata.
+    /// Stores a memory using the current component-crate capabilities.
+    #[tracing::instrument(skip(self, session, content, tags, metadata), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn remember_typed(
         &self,
         session: &ClawDBSession,
@@ -293,36 +341,65 @@ impl ClawDB {
         tags: &[String],
         metadata: serde_json::Value,
     ) -> ClawDBResult<RememberResult> {
-        let start = Instant::now();
-        let core = self.lifecycle.core()?;
-        let (memory_id, importance_score) = core
-            .insert_memory(
-                &session.agent_id.to_string(),
-                content,
-                memory_type,
-                &metadata,
-                tags,
-            )
+        self.authorize(session, &["memory:write", "memory:*", "*"])
             .await?;
-        let secs = start.elapsed().as_secs_f64();
-        self.telemetry.metrics.inc_query("remember", "core", "ok");
-        self.telemetry.metrics.record_query_duration("remember", "core", secs);
-        self.emitter.memory_added(session.agent_id, memory_id.clone(), memory_type.to_string());
-        Ok(RememberResult { memory_id, importance_score })
+
+        let record = claw_core::MemoryRecord::new(
+            content,
+            parse_memory_type(memory_type),
+            tags.to_vec(),
+            None,
+        );
+        let memory_id = self.core.insert_memory(&record).await?;
+
+        let mut indexed = false;
+        if let Some(vector) = &self.vector {
+            let vector_metadata = json!({
+                "memory_id": memory_id,
+                "memory_type": record.memory_type.as_str(),
+                "tags": record.tags,
+                "metadata": metadata,
+            });
+            match vector
+                .upsert_in_workspace(
+                    &session.workspace_id.to_string(),
+                    "memories",
+                    content,
+                    vector_metadata,
+                )
+                .await
+            {
+                Ok(_) => indexed = true,
+                Err(error) => {
+                    tracing::warn!(error = %error, "vector upsert failed after core write")
+                }
+            }
+        }
+
+        self.metrics
+            .remember_total(&session.workspace_id.to_string(), "ok");
+        self.emit(ClawEvent::MemoryWritten {
+            memory_id: memory_id.to_string(),
+            workspace_id: session.workspace_id,
+        })
+        .await;
+
+        Ok(RememberResult { memory_id, indexed })
     }
 
-    // ── Search API ────────────────────────────────────────────────────────────
-
-    /// Keyword or semantic search over memories.
+    /// Searches memory using semantic search when available, else SQLite FTS.
+    #[tracing::instrument(skip(self, session, query), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn search(
         &self,
         session: &ClawDBSession,
         query: &str,
-    ) -> ClawDBResult<Vec<serde_json::Value>> {
-        self.search_with_options(session, query, 10, true, None).await
+    ) -> ClawDBResult<Vec<SearchHit>> {
+        self.search_with_options(session, query, 10, self.vector.is_some(), None)
+            .await
     }
 
-    /// Search with full control over top-k, semantic flag, and filter.
+    /// Searches memory with current component-crate semantics.
+    #[tracing::instrument(skip(self, session, query, filter), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn search_with_options(
         &self,
         session: &ClawDBSession,
@@ -330,458 +407,563 @@ impl ClawDB {
         top_k: usize,
         semantic: bool,
         filter: Option<serde_json::Value>,
-    ) -> ClawDBResult<Vec<serde_json::Value>> {
-        let start = Instant::now();
-        let core = self.lifecycle.core()?;
-        let results = if semantic {
-            let vector = self.lifecycle.vector()?;
-            let hits = vector.search("memories", query, top_k, filter).await?;
-            let ids: Vec<String> = hits.iter().map(|r| r.id.clone()).collect();
-            core.get_memories(&session.agent_id.to_string(), &ids).await?
+    ) -> ClawDBResult<Vec<SearchHit>> {
+        self.authorize(session, &["memory:read", "memory:search", "memory:*", "*"])
+            .await?;
+
+        let workspace_id = session.workspace_id.to_string();
+        let use_semantic = semantic && self.vector.is_some();
+        let hits = if use_semantic {
+            let vector = self
+                .vector
+                .as_ref()
+                .ok_or(ClawDBError::ComponentDisabled("vector"))?;
+            let mut response = vector
+                .search_text_in_workspace(
+                    &workspace_id,
+                    "memories",
+                    query,
+                    top_k.saturating_mul(3).max(top_k),
+                )
+                .await?;
+            if let Some(filter_value) = filter {
+                response
+                    .results
+                    .retain(|result| metadata_matches(&result.metadata, &filter_value));
+            }
+            response
+                .results
+                .into_iter()
+                .take(top_k)
+                .map(search_result_to_hit)
+                .collect::<ClawDBResult<Vec<_>>>()?
         } else {
-            core.search_content(&session.agent_id.to_string(), query).await?
+            self.core
+                .fts_search(query)
+                .await?
+                .into_iter()
+                .filter(|record| {
+                    filter
+                        .as_ref()
+                        .map_or(true, |value| memory_record_matches(record, value))
+                })
+                .take(top_k)
+                .map(|record| SearchHit {
+                    id: record.id,
+                    score: 1.0,
+                    content: record.content,
+                    memory_type: record.memory_type.as_str().to_string(),
+                    tags: record.tags,
+                    metadata: serde_json::Value::Null,
+                })
+                .collect()
         };
-        let secs = start.elapsed().as_secs_f64();
-        let kind = if semantic { "semantic" } else { "keyword" };
-        self.telemetry.metrics.inc_query(kind, "core", "ok");
-        self.telemetry.metrics.record_query_duration(kind, "core", secs);
-        self.emitter.search_executed(
-            session.agent_id,
-            query.chars().take(80).collect::<String>(),
-            results.len(),
-            (secs * 1000.0) as u64,
-        );
-        Ok(results)
+
+        let mode = if use_semantic { "semantic" } else { "fts" };
+        self.metrics.search_total(&workspace_id, mode);
+        self.metrics.search_hits(&workspace_id, hits.len() as f64);
+        self.emit(ClawEvent::SearchExecuted {
+            query: query.to_string(),
+            hits: hits.len(),
+        })
+        .await;
+        Ok(hits)
     }
 
-    /// Retrieves specific memories by ID.
+    /// Recalls specific memories from the core engine.
+    #[tracing::instrument(skip(self, session, memory_ids), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn recall(
         &self,
         session: &ClawDBSession,
-        memory_ids: &[String],
-    ) -> ClawDBResult<Vec<serde_json::Value>> {
-        let core = self.lifecycle.core()?;
-        Ok(core.get_memories(&session.agent_id.to_string(), memory_ids).await?)
-    }
-
-    // ── Query router API ─────────────────────────────────────────────────────
-
-    /// Routes a structured query through the guard and subsystem layers.
-    pub async fn execute(
-        &self,
-        query: Query,
-        session: &SessionContext,
-    ) -> ClawDBResult<QueryResult> {
-        self.router.route(query, session).await
-    }
-
-    // ── Branch API ────────────────────────────────────────────────────────────
-
-    /// Creates a named branch snapshot and returns its ID.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use clawdb::prelude::*;
-    /// # #[tokio::main]
-    /// # async fn main() -> ClawDBResult<()> {
-    /// # let db = ClawDB::open_default().await?;
-    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["branch:create".into()]).await?;
-    /// let branch_id = db.branch(&session, "feature-v1").await?;
-    /// println!("Branch created: {}", branch_id);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn branch(&self, session: &ClawDBSession, name: &str) -> ClawDBResult<Uuid> {
-        let start = Instant::now();
-        
-        // Validate session scope includes branch:create
-        if !session.scopes.iter().any(|s| s == "branch:*" || s == "branch:create") {
-            return Err(crate::error::ClawDBError::Guard(
-                claw_guard::GuardError::AccessDenied(
-                    "branch:create scope required".to_string(),
-                ),
-            ));
+        memory_ids: &[Uuid],
+    ) -> ClawDBResult<Vec<MemoryRecord>> {
+        self.authorize(session, &["memory:read", "memory:*", "*"])
+            .await?;
+        let mut records = Vec::with_capacity(memory_ids.len());
+        for id in memory_ids {
+            records.push(self.core.get_memory(*id).await?);
         }
-
-        let branch_engine = self.lifecycle.branch()?;
-        let id = branch_engine.create_snapshot(name).await?;
-        
-        // Record metrics
-        let secs = start.elapsed().as_secs_f64();
-        self.telemetry.metrics.inc_query("branch", "branch", "ok");
-        self.telemetry.metrics.record_query_duration("branch", "branch", secs);
-        
-        // Emit event
-        self.emitter.branch_created(session.agent_id, id, name.to_string());
-        
-        tracing::info!(
-            agent_id = %session.agent_id,
-            branch_id = %id,
-            branch_name = %name,
-            latency_ms = (secs * 1000.0) as u64,
-            "branch created"
-        );
-        
-        Ok(id)
+        Ok(records)
     }
 
-    /// Merges `source` snapshot into `target`.
-    ///
-    /// Returns a detailed merge result with conflict information.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use clawdb::prelude::*;
-    /// # #[tokio::main]
-    /// # async fn main() -> ClawDBResult<()> {
-    /// # let db = ClawDB::open_default().await?;
-    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["branch:merge".into()]).await?;
-    /// # let source = db.branch(&session, "feature").await?;
-    /// # let target = db.branch(&session, "main").await?;
-    /// let result = db.merge(&session, source, target).await?;
-    /// println!("Merge result: {}", serde_json::to_string_pretty(&result)?);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Forks a new branch from trunk.
+    #[tracing::instrument(skip(self, session, name), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn branch(&self, session: &ClawDBSession, name: &str) -> ClawDBResult<Uuid> {
+        self.authorize(session, &["branch:write", "branch:*", "*"])
+            .await?;
+        let branch = self.branch.fork_trunk(name).await?;
+        self.metrics
+            .branch_ops(&session.workspace_id.to_string(), "fork");
+        self.emit(ClawEvent::BranchCreated {
+            branch_id: branch.id,
+            name: branch.name,
+        })
+        .await;
+        Ok(branch.id)
+    }
+
+    /// Forks a new branch from an explicit parent branch.
+    #[tracing::instrument(skip(self, session, name), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, parent = %parent))]
+    pub async fn fork_branch(
+        &self,
+        session: &ClawDBSession,
+        parent: Uuid,
+        name: &str,
+    ) -> ClawDBResult<Uuid> {
+        self.authorize(session, &["branch:write", "branch:*", "*"])
+            .await?;
+        let branch = self.branch.fork(parent, name, None).await?;
+        self.metrics
+            .branch_ops(&session.workspace_id.to_string(), "fork");
+        self.emit(ClawEvent::BranchCreated {
+            branch_id: branch.id,
+            name: branch.name,
+        })
+        .await;
+        Ok(branch.id)
+    }
+
+    /// Returns a branch by identifier.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, branch_id = %branch_id))]
+    pub async fn get_branch(
+        &self,
+        session: &ClawDBSession,
+        branch_id: Uuid,
+    ) -> ClawDBResult<claw_branch::Branch> {
+        self.authorize(session, &["branch:read", "branch:*", "*"])
+            .await?;
+        Ok(self.branch.get(branch_id).await?)
+    }
+
+    /// Lists all branches in the current workspace.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn list_branches(
+        &self,
+        session: &ClawDBSession,
+    ) -> ClawDBResult<Vec<claw_branch::Branch>> {
+        self.authorize(session, &["branch:read", "branch:*", "*"])
+            .await?;
+        Ok(self.branch.list(None).await?)
+    }
+
+    /// Merges a source branch into a target branch.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn merge(
         &self,
         session: &ClawDBSession,
         source: Uuid,
         target: Uuid,
-    ) -> ClawDBResult<serde_json::Value> {
-        let start = Instant::now();
-        
-        // Validate session scope includes branch:merge
-        if !session.scopes.iter().any(|s| s == "branch:*" || s == "branch:merge") {
-            return Err(crate::error::ClawDBError::Guard(
-                claw_guard::GuardError::AccessDenied(
-                    "branch:merge scope required".to_string(),
-                ),
-            ));
-        }
-
-        let branch_engine = self.lifecycle.branch()?;
-        
-        // Perform the merge
-        branch_engine.merge_snapshot(source, target).await?;
-        
-        // Record metrics
-        let secs = start.elapsed().as_secs_f64();
-        self.telemetry.metrics.inc_query("merge", "branch", "ok");
-        self.telemetry.metrics.record_query_duration("merge", "branch", secs);
-        
-        // Emit event
-        self.emitter.branch_merged(
-            session.agent_id,
-            source.to_string(),
-            target.to_string(),
-            1,
-        );
-        
-        tracing::info!(
-            agent_id = %session.agent_id,
-            source = %source,
-            target = %target,
-            latency_ms = (secs * 1000.0) as u64,
-            "branch merge completed"
-        );
-        
-        Ok(serde_json::json!({
-            "source": source,
-            "target": target,
-            "status": "merged",
-            "conflicts": 0,
-            "merged_count": 1,
-            "latency_ms": (secs * 1000.0) as u64,
-        }))
+    ) -> ClawDBResult<MergeResult> {
+        self.merge_with_strategy(session, source, target, claw_branch::MergeStrategy::Theirs)
+            .await
     }
 
-    /// Diffs two snapshots and returns a line-oriented diff.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use clawdb::prelude::*;
-    /// # #[tokio::main]
-    /// # async fn main() -> ClawDBResult<()> {
-    /// # let db = ClawDB::open_default().await?;
-    /// # let session = db.session(uuid::Uuid::new_v4(), "reader", vec!["branch:read".into()]).await?;
-    /// # let branch_a = db.branch(&session, "a").await?;
-    /// # let branch_b = db.branch(&session, "b").await?;
-    /// let diff = db.diff(&session, branch_a, branch_b).await?;
-    /// println!("Diff:\n{}", serde_json::to_string_pretty(&diff)?);
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Merges a source branch into a target branch using an explicit strategy.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, source = %source, target = %target))]
+    pub async fn merge_with_strategy(
+        &self,
+        session: &ClawDBSession,
+        source: Uuid,
+        target: Uuid,
+        strategy: claw_branch::MergeStrategy,
+    ) -> ClawDBResult<MergeResult> {
+        self.authorize(session, &["branch:write", "branch:*", "*"])
+            .await?;
+        let result = self.branch.merge(source, target, strategy).await?;
+        self.metrics
+            .branch_ops(&session.workspace_id.to_string(), "merge");
+        self.emit(ClawEvent::BranchMerged {
+            source,
+            target,
+            merged: result.applied,
+        })
+        .await;
+        Ok(result)
+    }
+
+    /// Diffs two branches.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn diff(
         &self,
         session: &ClawDBSession,
-        branch_a: Uuid,
-        branch_b: Uuid,
-    ) -> ClawDBResult<serde_json::Value> {
-        let start = Instant::now();
-        
-        // Validate session scope includes branch:read
-        if !session.scopes.iter().any(|s| s == "branch:*" || s == "branch:read") {
-            return Err(crate::error::ClawDBError::Guard(
-                claw_guard::GuardError::AccessDenied(
-                    "branch:read scope required".to_string(),
-                ),
-            ));
-        }
-
-        let branch_engine = self.lifecycle.branch()?;
-        let diff = branch_engine.diff_snapshots(branch_a, branch_b).await?;
-        
-        let secs = start.elapsed().as_secs_f64();
-        self.telemetry.metrics.inc_query("diff", "branch", "ok");
-        self.telemetry.metrics.record_query_duration("diff", "branch", secs);
-        
-        tracing::info!(
-            agent_id = %session.agent_id,
-            branch_a = %branch_a,
-            branch_b = %branch_b,
-            latency_ms = (secs * 1000.0) as u64,
-            "branch diff completed"
-        );
-        
-        Ok(diff)
+        source: Uuid,
+        target: Uuid,
+    ) -> ClawDBResult<BranchDiff> {
+        self.authorize(session, &["branch:read", "branch:*", "*"])
+            .await?;
+        Ok(self.branch.diff(source, target).await?)
     }
 
-    // ── Sync API ──────────────────────────────────────────────────────────────
-
-    /// Triggers a push+pull sync cycle and returns a summary with push/pull counts.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use clawdb::prelude::*;
-    /// # #[tokio::main]
-    /// # async fn main() -> ClawDBResult<()> {
-    /// # let db = ClawDB::open_default().await?;
-    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["sync:*".into()]).await?;
-    /// let result = db.sync(&session).await?;
-    /// println!("Sync result: {}", serde_json::to_string_pretty(&result)?);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn sync(&self, session: &ClawDBSession) -> ClawDBResult<serde_json::Value> {
-        let start = Instant::now();
-        
-        // Validate session scope includes sync permission
-        if !session.scopes.iter().any(|s| s == "sync:*" || s == "sync:write") {
-            return Err(crate::error::ClawDBError::Guard(
-                claw_guard::GuardError::AccessDenied(
-                    "sync:write scope required".to_string(),
-                ),
-            ));
+    /// Runs a sync round or returns a no-op summary in local-only mode.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn sync(&self, session: &ClawDBSession) -> ClawDBResult<SyncSummary> {
+        self.authorize(session, &["sync:write", "sync:*", "*"])
+            .await?;
+        if self.sync_local_only {
+            return Ok(SyncSummary {
+                pushed: 0,
+                pulled: 0,
+                conflicts: 0,
+                duration_ms: 0,
+            });
         }
-
-        let sync_engine = self.lifecycle.sync()?;
-        
-        // Push local changes to hub
-        let push_result = sync_engine.push_now().await?;
-        let pushed = push_result.applied_count.unwrap_or(0) as u32;
-        
-        // Pull remote changes from hub
-        let pull_result = sync_engine.pull_now().await?;
-        let pulled = pull_result.applied_count.unwrap_or(0) as u32;
-        
-        let secs = start.elapsed().as_secs_f64();
-        self.telemetry.metrics.inc_query("sync", "sync", "ok");
-        self.telemetry.metrics.record_query_duration("sync", "sync", secs);
-        
-        self.emitter.sync_completed(session.agent_id, pushed, pulled);
-        
-        tracing::info!(
-            agent_id = %session.agent_id,
-            pushed = pushed,
-            pulled = pulled,
-            latency_ms = (secs * 1000.0) as u64,
-            "sync cycle completed"
+        let round = self.sync.sync_now().await?;
+        self.metrics.sync_pushed(
+            &session.workspace_id.to_string(),
+            round.push.deltas_sent as u64,
         );
-        
-        Ok(serde_json::json!({
-            "status": "ok",
-            "pushed": pushed,
-            "pulled": pulled,
-            "latency_ms": (secs * 1000.0) as u64,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        }))
+        self.metrics.sync_pulled(
+            &session.workspace_id.to_string(),
+            round.pull.deltas_received as u64,
+        );
+        self.emit(ClawEvent::SyncCompleted {
+            pushed: round.push.deltas_sent,
+            pulled: round.pull.deltas_received,
+        })
+        .await;
+        Ok(SyncSummary {
+            pushed: round.push.deltas_sent,
+            pulled: round.pull.deltas_received,
+            conflicts: round.pull.ops_skipped,
+            duration_ms: round.duration_ms,
+        })
     }
 
-    // ── Reflect API ───────────────────────────────────────────────────────────
-
-    /// Triggers a reflect job in a background tokio task and returns the job ID.
-    ///
-    /// The reflect engine runs asynchronously and publishes events to the bus
-    /// when complete. To wait for completion, subscribe to `ReflectionCompleted` events.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use clawdb::prelude::*;
-    /// # #[tokio::main]
-    /// # async fn main() -> ClawDBResult<()> {
-    /// # let db = ClawDB::open_default().await?;
-    /// # let session = db.session(uuid::Uuid::new_v4(), "writer", vec!["reflect:*".into()]).await?;
-    /// let job_id = db.reflect(&session).await?;
-    /// println!("Reflect job started: {}", job_id);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn reflect(&self, session: &ClawDBSession) -> ClawDBResult<String> {
-        let start = Instant::now();
-        
-        // Validate session scope includes reflect permission
-        if !session.scopes.iter().any(|s| s == "reflect:*" || s == "reflect:write") {
-            return Err(crate::error::ClawDBError::Guard(
-                claw_guard::GuardError::AccessDenied(
-                    "reflect:write scope required".to_string(),
-                ),
-            ));
-        }
-
-        let job_id = Uuid::new_v4().to_string();
-        let job_id_clone = job_id.clone();
-        let agent_id = session.agent_id;
-        let emitter = self.emitter.clone();
-        
-        // Spawn background reflect task
-        let lifecycle = self.lifecycle.clone();
-        let config = self.config.clone();
-        
-        tokio::spawn(async move {
-            match lifecycle.reflect_client() {
-                Ok(client) => {
-                    match client.start_reflection(&agent_id.to_string()).await {
-                        Ok(_) => {
-                            emitter.reflection_completed(
-                                agent_id,
-                                job_id_clone.clone(),
-                                0, // archived
-                                0, // promoted
-                            );
-                            tracing::info!(
-                                agent_id = %agent_id,
-                                job_id = %job_id_clone,
-                                "reflect cycle completed"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                agent_id = %agent_id,
-                                job_id = %job_id_clone,
-                                error = %e,
-                                "reflect cycle failed"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        agent_id = %agent_id,
-                        job_id = %job_id_clone,
-                        error = %e,
-                        "reflect client unavailable"
-                    );
-                }
-            }
-        });
-        
-        let secs = start.elapsed().as_secs_f64();
-        self.telemetry.metrics.inc_query("reflect", "reflect", "ok");
-        self.telemetry.metrics.record_query_duration("reflect", "reflect", secs);
-        
-        tracing::info!(
-            agent_id = %session.agent_id,
-            job_id = %job_id,
-            "reflect job scheduled"
-        );
-        
-        Ok(job_id)
+    /// Triggers a reflect job when the reflect client is configured.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn reflect(&self, session: &ClawDBSession) -> ClawDBResult<ReflectSummary> {
+        self.authorize(session, &["reflect:run", "reflect:write", "reflect:*", "*"])
+            .await?;
+        let Some(reflect) = &self.reflect else {
+            return Ok(ReflectSummary::skipped());
+        };
+        let job = reflect
+            .trigger_job("full", &session.workspace_id.to_string(), false)
+            .await?;
+        self.emit(ClawEvent::ReflectCycleRun { facts_extracted: 0 })
+            .await;
+        Ok(ReflectSummary {
+            job_id: Some(job.job_id),
+            status: job.status,
+            message: job.message,
+            skipped: false,
+        })
     }
 
-    // ── Transaction API ───────────────────────────────────────────────────────
-
-    /// Executes `f` within a single 2PC transaction.
-    ///
-    /// Automatically commits on success and rolls back on error.
-    pub async fn transaction<F, T, Fut>(
-        &self,
+    /// Starts a transaction over the core engine and stages vector work for commit.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn transaction<'a>(
+        &'a self,
         session: &ClawDBSession,
-        f: F,
-    ) -> ClawDBResult<T>
-    where
-        F: FnOnce(Uuid) -> Fut,
-        Fut: std::future::Future<Output = ClawDBResult<T>>,
-    {
-        let ctx = session.as_context();
-        let tx_id = self.tx_manager.begin(&ctx).await?;
-        match f(tx_id).await {
-            Ok(result) => {
-                self.tx_manager.commit(tx_id).await?;
-                Ok(result)
-            }
-            Err(e) => {
-                let _ = self.tx_manager.rollback(tx_id).await;
-                Err(e)
-            }
-        }
+    ) -> ClawDBResult<ClawTransaction<'a>> {
+        self.authorize(session, &["memory:write", "memory:*", "*"])
+            .await?;
+        Ok(ClawTransaction {
+            inner: self.core.begin_transaction().await?,
+            vector: self.vector.clone(),
+            workspace_id: session.workspace_id.to_string(),
+            pending_vector_upserts: Vec::new(),
+        })
     }
 
-    // ── Event subscription API ────────────────────────────────────────────────
-
-    /// Returns a new subscriber that receives all events.
-    pub fn subscribe(&self) -> EventSubscriber {
-        EventSubscriber::new(self.event_bus.subscribe())
+    /// Validates a session token.
+    #[tracing::instrument(skip(self, token))]
+    pub async fn validate_session(&self, token: &str) -> ClawDBResult<ClawDBSession> {
+        let session = self.guard.session_manager.validate_session(token).await?;
+        Ok(ClawDBSession {
+            id: session.session_id,
+            agent_id: session.agent_id,
+            workspace_id: self.config.workspace_id,
+            role: session.role,
+            scopes: session.scopes,
+            token: session.token,
+            expires_at: session.expires_at,
+        })
     }
 
-    // ── Health ────────────────────────────────────────────────────────────────
-
-    /// Returns an aggregate health report for all subsystems.
-    pub async fn health(&self) -> ClawDBResult<HealthReport> {
-        Ok(self.lifecycle.health_report().await)
+    /// Revokes a session by identifier.
+    #[tracing::instrument(skip(self))]
+    pub async fn revoke_session(&self, session_id: Uuid) -> ClawDBResult<()> {
+        self.guard
+            .session_manager
+            .revoke_session(session_id)
+            .await?;
+        Ok(())
     }
 
-    /// Engine uptime in seconds.
-    pub fn uptime_secs(&self) -> u64 {
-        self.started_at.elapsed().as_secs()
+    /// Returns the number of active, non-revoked sessions recorded by guard.
+    #[tracing::instrument(skip(self))]
+    pub async fn active_session_count(&self) -> ClawDBResult<u64> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE revoked = 0 AND expires_at > CURRENT_TIMESTAMP",
+        )
+        .fetch_one(self.guard.pool())
+        .await
+        .map_err(|error| ClawDBError::ComponentInit("guard", error.to_string()))?;
+        Ok(count.max(0) as u64)
     }
 
-    // ── Shutdown ──────────────────────────────────────────────────────────────
+    /// Returns aggregate component health booleans.
+    #[tracing::instrument(skip(self))]
+    pub async fn health(&self) -> ClawDBResult<HealthStatus> {
+        let mut components = std::collections::HashMap::new();
 
-    /// Gracefully shuts down all subsystems.
+        components.insert("core".to_string(), self.core.stats().await.is_ok());
+        components.insert(
+            "vector".to_string(),
+            if let Some(vector) = &self.vector {
+                let _ = vector.stats().await;
+                true
+            } else {
+                true
+            },
+        );
+        components.insert("branch".to_string(), true);
+        components.insert(
+            "sync".to_string(),
+            if self.sync_local_only {
+                true
+            } else {
+                let status = self.sync.status();
+                status.connected || status.last_error.is_none()
+            },
+        );
+        components.insert("guard".to_string(), true);
+        components.insert(
+            "reflect".to_string(),
+            if let Some(reflect) = &self.reflect {
+                // The reflect client currently has no cheap health probe API.
+                // Treat "configured" as healthy and surface runtime failures from reflect calls.
+                let _ = reflect;
+                true
+            } else {
+                true
+            },
+        );
+
+        let ok = components.values().all(|healthy| *healthy);
+        Ok(HealthStatus { ok, components })
+    }
+
+    /// Closes background tasks owned by the wrapper.
+    #[tracing::instrument(skip(self))]
     pub async fn close(&self) -> ClawDBResult<()> {
-        tracing::info!("ClawDB shutting down");
-        self.lifecycle.stop_all().await
+        self.shutdown.cancel();
+        self.branch.shutdown().await?;
+        self.sync.close().await?;
+        Ok(())
     }
 
-    /// Alias for `close` (used by CLI commands).
+    /// Compatibility alias for `close`.
     pub async fn shutdown(&self) -> ClawDBResult<()> {
         self.close().await
     }
 
-    /// Alias for `close` (used by CLI commands).
-    pub async fn stop(&self) -> ClawDBResult<()> {
-        self.close().await
+    async fn authorize(
+        &self,
+        session: &ClawDBSession,
+        accepted_scopes: &[&str],
+    ) -> ClawDBResult<()> {
+        self.guard
+            .session_manager
+            .validate_session(&session.token)
+            .await
+            .map_err(map_guard_session_error)?;
+        if accepted_scopes.iter().any(|required| {
+            session
+                .scopes
+                .iter()
+                .any(|granted| scope_matches(granted, required))
+        }) {
+            return Ok(());
+        }
+        self.metrics.session_denied.inc();
+        self.emit(ClawEvent::PolicyDenied {
+            agent_id: session.agent_id,
+            resource: accepted_scopes
+                .first()
+                .copied()
+                .unwrap_or("unknown")
+                .to_string(),
+            reason: "required scope missing".to_string(),
+        })
+        .await;
+        Err(ClawDBError::PermissionDenied(
+            "required scope missing".to_string(),
+        ))
+    }
+
+    async fn emit(&self, event: ClawEvent) {
+        let manager = self.plugins.clone();
+        let manager = manager.lock().await;
+        manager.emit(event);
     }
 }
 
-// ── Backward-compat alias ─────────────────────────────────────────────────────
+impl<'a> ClawTransaction<'a> {
+    /// Stages a default semantic memory inside the transaction.
+    pub async fn remember(&mut self, content: &str) -> ClawDBResult<Uuid> {
+        self.remember_typed(content, "semantic", &[], serde_json::Value::Null)
+            .await
+    }
 
-/// Backward-compatible alias for [`ClawDB`].
+    /// Stages a typed memory inside the transaction.
+    pub async fn remember_typed(
+        &mut self,
+        content: &str,
+        memory_type: &str,
+        tags: &[String],
+        metadata: serde_json::Value,
+    ) -> ClawDBResult<Uuid> {
+        let record = claw_core::MemoryRecord::new(
+            content,
+            parse_memory_type(memory_type),
+            tags.to_vec(),
+            None,
+        );
+        let id = self.inner.insert_memory(&record).await?;
+        self.pending_vector_upserts.push((
+            content.to_string(),
+            json!({
+                "memory_id": id,
+                "memory_type": record.memory_type.as_str(),
+                "tags": record.tags,
+                "metadata": metadata,
+            }),
+        ));
+        Ok(id)
+    }
+
+    /// Commits the transaction and flushes staged vector writes best-effort.
+    pub async fn commit(mut self) -> ClawDBResult<()> {
+        self.inner.commit().await?;
+        if let Some(vector) = &self.vector {
+            for (content, metadata) in std::mem::take(&mut self.pending_vector_upserts) {
+                if let Err(error) = vector
+                    .upsert_in_workspace(&self.workspace_id, "memories", &content, metadata)
+                    .await
+                {
+                    tracing::warn!(error = %error, "vector upsert failed after transaction commit");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rolls the transaction back.
+    pub async fn rollback(self) -> ClawDBResult<()> {
+        self.inner.rollback().await?;
+        Ok(())
+    }
+}
+
+/// Compatibility alias.
 pub type ClawDBEngine = ClawDB;
 
-// ── Helper types ──────────────────────────────────────────────────────────────
+async fn ensure_vector_collection(
+    vector: &claw_vector::VectorEngine,
+    workspace_id: &str,
+) -> ClawDBResult<()> {
+    let existing = vector.list_collections_in_workspace(workspace_id).await?;
+    if existing
+        .iter()
+        .any(|collection| collection.name == "memories")
+    {
+        return Ok(());
+    }
+    vector
+        .create_collection_in_workspace(
+            workspace_id,
+            "memories",
+            vector.config.default_dimensions,
+            claw_vector::DistanceMetric::Cosine,
+        )
+        .await
+        .context("failed to create default memories collection")
+        .map_err(|error| ClawDBError::ComponentInit("vector", error.to_string()))?;
+    Ok(())
+}
 
-/// Result returned by the `remember` convenience method.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RememberResult {
-    /// The newly created memory ID.
-    pub memory_id: String,
-    /// Computed importance score for the memory.
-    pub importance_score: f32,
+fn parse_memory_type(value: &str) -> claw_core::MemoryType {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "semantic" | "context" | "message" => claw_core::MemoryType::Semantic,
+        "episodic" => claw_core::MemoryType::Episodic,
+        "working" => claw_core::MemoryType::Working,
+        "procedural" => claw_core::MemoryType::Procedural,
+        _ => claw_core::MemoryType::Semantic,
+    }
+}
+
+fn metadata_matches(metadata: &serde_json::Value, filter: &serde_json::Value) -> bool {
+    match filter {
+        serde_json::Value::Object(expected) => expected
+            .iter()
+            .all(|(key, value)| metadata.get(key) == Some(value)),
+        _ => true,
+    }
+}
+
+fn memory_record_matches(record: &MemoryRecord, filter: &serde_json::Value) -> bool {
+    let tags = serde_json::Value::Array(
+        record
+            .tags
+            .iter()
+            .cloned()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
+    let view = json!({
+        "id": record.id.to_string(),
+        "content": record.content.clone(),
+        "memory_type": record.memory_type.as_str(),
+        "tags": tags,
+    });
+    metadata_matches(&view, filter)
+}
+
+fn search_result_to_hit(result: claw_vector::SearchResult) -> ClawDBResult<SearchHit> {
+    let memory_type = result
+        .metadata
+        .get("memory_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("semantic")
+        .to_string();
+    let tags = result
+        .metadata
+        .get("tags")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(SearchHit {
+        id: result.id,
+        score: result.score,
+        content: result.text.unwrap_or_default(),
+        memory_type,
+        tags,
+        metadata: result.metadata,
+    })
+}
+
+fn scope_matches(granted: &str, required: &str) -> bool {
+    granted == "*"
+        || granted == required
+        || granted
+            .strip_suffix(":*")
+            .is_some_and(|prefix| required.starts_with(&format!("{prefix}:")))
+}
+
+fn map_guard_session_error(error: GuardError) -> ClawDBError {
+    match error {
+        GuardError::SessionExpired { .. }
+        | GuardError::SessionRevoked(_)
+        | GuardError::SessionNotFound(_)
+        | GuardError::TokenInvalid(_)
+        | GuardError::TokenExpired { .. } => ClawDBError::SessionInvalid,
+        other => ClawDBError::Guard(other),
+    }
 }

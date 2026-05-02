@@ -3,20 +3,45 @@ name = "clawdb-server"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "ClawDB gRPC server binary"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "gRPC and HTTP server for the ClawDB cognitive database."
 
 [[bin]]
 name = "clawdb-server"
 path = "src/main.rs"
 
 [dependencies]
-tokio.workspace = true
-tonic.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-clawdb = { path = "../clawdb" }
+clawdb = { path = "../clawdb", version = "0.1.0" }
+tokio = { workspace = true }
+tonic = { workspace = true, features = ["transport", "tls", "tls-roots"] }
+prost = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true, features = ["limit", "timeout", "util"] }
+tower-http = { workspace = true, features = ["cors", "trace", "request-id", "timeout", "limit", "map-response-body", "set-header", "normalize-path"] }
+prometheus-client = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+tokio-util = { workspace = true }
+governor = { workspace = true }
+chrono = { workspace = true }
+tokio-stream = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 dirs = "5"
+config = "0.14"
+http = "1"
+rcgen = "0.12"
+tonic-reflection = "0.12"
+
+[build-dependencies]
+tonic-build = { version = "0.12", features = ["prost"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"

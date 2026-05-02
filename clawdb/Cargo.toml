@@ -3,7 +3,16 @@ name = "clawdb"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "ClawDB aggregate runtime"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "The cognitive database for AI agents — unified memory, semantic retrieval, branching, sync, and governance."
+documentation = "https://docs.rs/clawdb"
+readme = "README.md"
+keywords = ["database", "ai", "agents", "memory", "cognitive"]
+categories = ["database", "asynchronous"]
+exclude = ["target/", "benches/", ".github/"]
 
 [lib]
 name = "clawdb"
@@ -37,12 +46,12 @@ axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 libloading.workspace = true
-
-claw-core = { path = "../../claw-core" }
-claw-vector = { path = "../../claw-vector" }
-claw-sync = { path = "../../claw-sync" }
-claw-branch = { path = "../../claw-branch" }
-claw-guard = { path = "../../claw-guard" }
+claw-core.workspace = true
+claw-vector.workspace = true
+claw-sync.workspace = true
+claw-branch.workspace = true
+claw-guard.workspace = true
+claw-reflect-client.workspace = true
 
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
@@ -50,7 +59,8 @@ toml = "0.8"
 notify = "6"
 reqwest = { version = "0.12", features = ["json"] }
 anyhow = "1"
-cfg_if = "1"
+cfg-if = "1"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls"] }
 
 [build-dependencies]
 tonic-build = "0.12"

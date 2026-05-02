@@ -1,8 +1,4 @@
-//! API layer: gRPC service, HTTP REST server, and reflect HTTP client.
+//! Minimal API surface for running local ClawDB servers.
 
 pub mod grpc;
-pub mod grpc_service;
 pub mod http;
-pub mod reflect_client;
-
-pub use reflect_client::ReflectClient;
