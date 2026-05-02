@@ -1,25 +1,46 @@
 [package]
-name = "clawdb-cli"
-version = "0.1.0"
-edition.workspace = true
+name          = "clawdb-cli"
+version       = "0.1.0"
+edition.workspace      = true
 rust-version.workspace = true
-description = "ClawDB command-line interface"
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+authors.workspace      = true
+description   = "Command-line interface for the ClawDB cognitive database."
+default-run   = "clawdb"
+
+[[bin]]
+name = "clawdb"
+path = "src/main.rs"
 
 [[bin]]
 name = "clawdb-cli"
 path = "src/main.rs"
 
 [dependencies]
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tracing.workspace = true
-uuid.workspace = true
-clawdb = { path = "../clawdb" }
-clap = { version = "4", features = ["derive", "env"] }
-anyhow = "1"
-dirs = "5"
-toml = "0.8"
-chrono.workspace = true
-rustyline = "14"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+clap          = { version = "4", features = ["derive", "env", "string", "wrap_help"] }
+clap_complete = "4"
+reqwest       = { version = "0.12", default-features = false,
+				  features = ["json", "rustls-tls", "gzip"] }
+tokio         = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+uuid          = { workspace = true }
+tracing       = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror     = { workspace = true }
+toml          = "0.8"
+dirs          = "5"
+tabled        = "0.14"
+indicatif     = "0.17"
+dialoguer     = "0.11"
+colored       = "2"
+backoff       = { workspace = true }
+
+[dev-dependencies]
+assert_cmd  = "2"
+wiremock    = "0.6"
+tempfile    = "3"
+predicates  = "2"
+tokio       = { workspace = true }

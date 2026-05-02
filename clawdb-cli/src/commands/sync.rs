@@ -1,50 +1,59 @@
-//! `clawdb sync` — push/pull/reconcile operations.
+//! `clawdb sync` — POST /v1/sync with a spinner while waiting.
 
-use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Args;
-use clawdb::{ClawDB, ClawDBResult};
-use uuid::Uuid;
+use indicatif::{ProgressBar, ProgressStyle};
 
-use super::load_config;
+use crate::client::ClawDBClient;
+use crate::error::CliResult;
+use crate::output::OutputFormat;
+use crate::types::SyncResult;
 
 #[derive(Debug, Clone, Args)]
 pub struct SyncArgs {
+    /// Perform a dry-run without committing changes.
     #[arg(long)]
-    pub push_only: bool,
-    #[arg(long)]
-    pub pull_only: bool,
-    #[arg(long)]
-    pub reconcile: bool,
-    #[arg(long)]
-    pub agent_id: Option<Uuid>,
-    #[arg(long, default_value = "assistant")]
-    pub role: String,
+    pub dry_run: bool,
 }
 
-pub async fn run(args: SyncArgs, data_dir: PathBuf) -> ClawDBResult<()> {
-    let cfg = load_config(&data_dir)?;
-    let agent_id = args.agent_id.unwrap_or(cfg.agent_id);
-    let db = ClawDB::open(&data_dir).await?;
-    let session = db
-        .session(agent_id, &args.role, vec!["sync:write".to_string(), "sync:read".to_string()])
-        .await?;
-
-    let sync_engine = db.lifecycle.sync()?;
-    if args.push_only {
-        sync_engine.push_now().await?;
-        println!("Synced: 1 pushed, 0 pulled, 0 conflicts");
-    } else if args.pull_only {
-        sync_engine.pull_now().await?;
-        println!("Synced: 0 pushed, 1 pulled, 0 conflicts");
+pub async fn execute(
+    args: SyncArgs,
+    client: &ClawDBClient,
+    fmt: &OutputFormat,
+    quiet: bool,
+) -> CliResult<()> {
+    let pb = if !quiet {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
+        );
+        pb.enable_steady_tick(Duration::from_millis(120));
+        pb.set_message("Syncing…");
+        Some(pb)
     } else {
-        let v = db.sync(&session).await?;
-        let pushed = v["pushed"].as_i64().unwrap_or(0);
-        let pulled = v["pulled"].as_i64().unwrap_or(0);
-        let conflicts = v["conflicts"].as_i64().unwrap_or(0);
-        let _ = args.reconcile;
-        println!("Synced: {pushed} pushed, {pulled} pulled, {conflicts} conflicts");
+        None
+    };
+
+    let body = serde_json::json!({ "dry_run": args.dry_run });
+    let result: SyncResult = client.post("/v1/sync", &body).await?;
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 
-    db.close().await
+    match fmt {
+        OutputFormat::Json => crate::output::print_json(&result, quiet),
+        _ => {
+            if !quiet {
+                println!(
+                    "↑ {} pushed  ↓ {} pulled  △ {} conflicts",
+                    result.pushed, result.pulled, result.conflicts
+                );
+            }
+        }
+    }
+
+    Ok(())
 }

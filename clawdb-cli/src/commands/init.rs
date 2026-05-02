@@ -1,74 +1,70 @@
-//! `clawdb init` — initialise data directory and bootstrap all components.
+//! `clawdb init` — create ~/.clawdb directory and write a default config file.
 
 use std::path::PathBuf;
 
 use clap::Args;
-use clawdb::{ClawDB, ClawDBConfig, ClawDBResult};
 use uuid::Uuid;
 
-use super::output_json;
+use crate::config::CliConfig;
+use crate::error::CliResult;
+use crate::output::{print_success, OutputFormat};
 
 #[derive(Debug, Clone, Args)]
 pub struct InitArgs {
-    #[arg(long)]
-    pub workspace_id: Option<Uuid>,
-    #[arg(long)]
-    pub agent_id: Option<Uuid>,
+    /// Data directory (default: ~/.clawdb).
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
-    #[arg(long)]
-    pub embedding_url: Option<String>,
-    #[arg(long)]
-    pub hub_url: Option<String>,
+
+    /// Also write a reflect config stub to .env.reflect.
     #[arg(long)]
     pub with_reflect: bool,
+
+    /// Workspace UUID (auto-generated if omitted).
+    #[arg(long)]
+    pub workspace_id: Option<Uuid>,
 }
 
-pub async fn run(args: InitArgs, data_dir: PathBuf) -> ClawDBResult<()> {
-    let data_dir = args.data_dir.unwrap_or(data_dir);
-    std::fs::create_dir_all(&data_dir)?;
+pub async fn execute(args: InitArgs, fmt: &OutputFormat, quiet: bool) -> CliResult<()> {
+    let dir = args.data_dir.unwrap_or_else(CliConfig::config_dir);
+    let cfg_path = dir.join("config.toml");
 
+    if cfg_path.exists() {
+        let overwrite = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt("Already initialised. Overwrite?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if !overwrite {
+            return Ok(());
+        }
+    }
+
+    std::fs::create_dir_all(&dir)?;
     let workspace_id = args.workspace_id.unwrap_or_else(Uuid::new_v4);
-    let agent_id = args.agent_id.unwrap_or_else(Uuid::new_v4);
+    let cfg = CliConfig {
+        base_url: Some("http://localhost:8080".to_string()),
+        workspace_id: Some(workspace_id),
+        data_dir: Some(dir.clone()),
+        log_level: Some("info".to_string()),
+    };
+    let raw = toml::to_string_pretty(&cfg)?;
+    std::fs::write(&cfg_path, raw)?;
 
-    let mut cfg = ClawDBConfig::default_for_dir(&data_dir);
-    cfg.data_dir = data_dir.clone();
-    cfg.workspace_id = workspace_id;
-    cfg.agent_id = agent_id;
-    if let Some(url) = args.embedding_url {
-        cfg.vector.embedding_service_url = url;
-    }
-    if let Some(url) = args.hub_url {
-        cfg.sync.hub_url = Some(url);
-    }
     if args.with_reflect {
-        cfg.reflect.service_url = "http://localhost:8002".to_string();
+        let env_path = dir.join(".env.reflect");
+        std::fs::write(
+            &env_path,
+            format!(
+                "REFLECT_BASE_URL=http://localhost:8002\nWORKSPACE_ID={}\n",
+                workspace_id
+            ),
+        )?;
     }
 
-    let cfg_path = data_dir.join("config.toml");
-    cfg.save(&cfg_path)?;
-
-    let db = ClawDB::new(cfg).await?;
-    db.close().await?;
-
-    if output_json() {
-        println!(
-            "{}",
-            serde_json::json!({
-                "ok": true,
-                "data_dir": data_dir,
-                "workspace_id": workspace_id,
-                "agent_id": agent_id,
-            })
-        );
-    } else {
-        println!(
-            "ClawDB initialised at {}\nWorkspace: {}\nAgent: {}",
-            data_dir.display(),
-            workspace_id,
-            agent_id
-        );
-    }
-
+    print_success(
+        &format!("ClawDB initialised at {}", dir.display()),
+        fmt,
+        quiet,
+    );
     Ok(())
 }

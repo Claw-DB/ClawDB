@@ -1,77 +1,73 @@
-//! `clawdb remember` — store memory content.
+//! `clawdb remember` — POST /v1/memories to store a memory.
 
 use std::path::PathBuf;
 
 use clap::Args;
-use clawdb::{ClawDB, ClawDBResult};
-use uuid::Uuid;
 
-use super::{load_config, output_json};
+use crate::client::ClawDBClient;
+use crate::error::CliResult;
+use crate::output::{print_success, OutputFormat};
+use crate::types::CreateMemoryResponse;
 
 #[derive(Debug, Clone, Args)]
 pub struct RememberArgs {
-    #[arg(index = 1, required_unless_present = "content")]
-    pub positional_content: Option<String>,
-    #[arg(long)]
+    /// Memory content (positional; use --file to read from a file instead).
+    #[arg(index = 1, required_unless_present = "file")]
     pub content: Option<String>,
-    #[arg(long = "type", default_value = "context")]
+
+    /// Memory type (default: message).
+    #[arg(long = "type", default_value = "message")]
     pub memory_type: String,
+
+    /// Comma-separated tags.
     #[arg(long)]
     pub tags: Option<String>,
+
+    /// Metadata as a JSON string.
     #[arg(long)]
     pub metadata: Option<String>,
+
+    /// Read content from a file instead of the positional argument.
     #[arg(long)]
-    pub agent_id: Option<Uuid>,
-    #[arg(long, default_value = "assistant")]
-    pub role: String,
+    pub file: Option<PathBuf>,
 }
 
-pub async fn run(args: RememberArgs, data_dir: PathBuf) -> ClawDBResult<()> {
-    let cfg = load_config(&data_dir)?;
-    let agent_id = args.agent_id.unwrap_or(cfg.agent_id);
-    let content = args
-        .content
-        .or(args.positional_content)
-        .unwrap_or_default();
+pub async fn execute(
+    args: RememberArgs,
+    client: &ClawDBClient,
+    fmt: &OutputFormat,
+    quiet: bool,
+) -> CliResult<()> {
+    let content = if let Some(f) = args.file {
+        std::fs::read_to_string(f)?
+    } else {
+        args.content.unwrap_or_default()
+    };
+
     let tags: Vec<String> = args
         .tags
         .as_deref()
         .unwrap_or("")
         .split(',')
         .map(str::trim)
-        .filter(|t| !t.is_empty())
+        .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
         .collect();
-    let metadata = if let Some(raw) = args.metadata.as_deref() {
+
+    let metadata: serde_json::Value = if let Some(raw) = &args.metadata {
         serde_json::from_str(raw)?
     } else {
         serde_json::Value::Null
     };
 
-    let db = ClawDB::open(&data_dir).await?;
-    let session = db
-        .session(
-            agent_id,
-            &args.role,
-            vec!["memory:write".to_string(), "memory:read".to_string()],
-        )
-        .await?;
-    let res = db
-        .remember_typed(&session, &content, &args.memory_type, &tags, metadata)
-        .await?;
+    let body = serde_json::json!({
+        "content": content,
+        "memory_type": args.memory_type,
+        "tags": tags,
+        "metadata": metadata,
+    });
 
-    if output_json() {
-        println!(
-            "{}",
-            serde_json::json!({
-                "memory_id": res.memory_id,
-                "memory_type": args.memory_type,
-                "importance_score": res.importance_score,
-            })
-        );
-    } else {
-        println!("Stored memory {} [{}]", res.memory_id, args.memory_type);
-    }
-
-    db.close().await
+    let resp: CreateMemoryResponse = client.post("/v1/memories", &body).await?;
+    print_success(&format!("Stored (id: {})", resp.id), fmt, quiet);
+    Ok(())
 }

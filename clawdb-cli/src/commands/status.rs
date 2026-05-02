@@ -1,50 +1,64 @@
-//! `clawdb status` — component health/status view.
-
-use std::path::PathBuf;
+//! `clawdb status` — GET /v1/health and display component status.
 
 use clap::Args;
-use clawdb::{ClawDB, ClawDBResult};
+use tabled::Tabled;
 
-use super::output_json;
+use crate::client::ClawDBClient;
+use crate::error::CliResult;
+use crate::output::{self, print_warning, OutputFormat};
+use crate::types::HealthResponse;
 
 #[derive(Debug, Clone, Args)]
 pub struct StatusArgs {}
 
-pub async fn run(_args: StatusArgs, data_dir: PathBuf) -> ClawDBResult<()> {
-    let db = ClawDB::open(&data_dir).await?;
-    let report = db.health().await?;
-    let ok = matches!(report.overall, clawdb::HealthStatus::Healthy);
+#[derive(Tabled, Clone)]
+struct ComponentRow {
+    #[tabled(rename = "Component")]
+    component: String,
+    #[tabled(rename = "Status")]
+    status: String,
+}
 
-    if output_json() {
-        let components = report
-            .components
-            .iter()
-            .map(|(name, c)| {
-                (
-                    name.clone(),
-                    serde_json::json!({
-                        "status": format!("{:?}", c.status),
-                        "latency_ms": c.latency_ms,
-                        "error": c.last_error,
-                    }),
-                )
-            })
-            .collect::<serde_json::Map<String, serde_json::Value>>();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "ok": ok,
-                "uptime_secs": db.uptime_secs(),
-                "components": components,
-            }))?
-        );
-    } else {
-        println!("ClawDB status: {}", if ok { "OK" } else { "DEGRADED" });
-        println!("Uptime: {}s", db.uptime_secs());
-        for (name, c) in report.components {
-            println!("  {:<10}: {:?}", name, c.status);
+pub async fn execute(
+    _args: StatusArgs,
+    client: &ClawDBClient,
+    fmt: &OutputFormat,
+    quiet: bool,
+) -> CliResult<()> {
+    let health: HealthResponse = client.get("/v1/health").await?;
+
+    match output::effective_format(fmt) {
+        OutputFormat::Json => output::print_json(&health, quiet),
+        OutputFormat::Tsv => {
+            let rows = build_rows(&health, fmt, quiet);
+            output::print_tsv(&rows, quiet);
+        }
+        OutputFormat::Table => {
+            let rows = build_rows(&health, fmt, quiet);
+            output::print_table(&rows, quiet);
         }
     }
 
-    db.close().await
+    Ok(())
+}
+
+fn build_rows(health: &HealthResponse, fmt: &OutputFormat, quiet: bool) -> Vec<ComponentRow> {
+    health
+        .components
+        .iter()
+        .map(|(name, val)| {
+            let healthy = val.as_bool().unwrap_or(false);
+            if !healthy {
+                print_warning(&format!("component '{}' is degraded", name), fmt, quiet);
+            }
+            ComponentRow {
+                component: name.clone(),
+                status: if healthy {
+                    "✓ ok".to_string()
+                } else {
+                    "✗ degraded".to_string()
+                },
+            }
+        })
+        .collect()
 }

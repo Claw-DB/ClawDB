@@ -1,25 +1,16 @@
-//! CLI subcommand modules — one module per `clawdb` command.
+//! CLI subcommand modules — one module per `clawdb` subcommand.
+//! The CLI is a pure HTTP client; it does not link against the clawdb library.
 
 pub mod branch;
+pub mod completion;
 pub mod config;
 pub mod init;
 pub mod policy;
+pub mod recall;
 pub mod reflect;
 pub mod remember;
 pub mod search;
+pub mod session;
 pub mod start;
 pub mod status;
 pub mod sync;
-
-use std::path::Path;
-
-pub(crate) fn output_json() -> bool {
-	std::env::var("CLAW_OUTPUT_JSON")
-		.ok()
-		.map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-		.unwrap_or(false)
-}
-
-pub(crate) fn load_config(data_dir: &Path) -> clawdb::ClawDBResult<clawdb::ClawDBConfig> {
-	clawdb::ClawDBConfig::load_or_default(data_dir)
-}

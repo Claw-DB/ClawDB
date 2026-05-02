@@ -1,193 +1,182 @@
-//! `clawdb branch` — create/list/diff/merge/discard branch snapshots.
+//! `clawdb branch` — manage memory branches via the HTTP API.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
-
-use chrono::Utc;
 use clap::{Args, Subcommand, ValueEnum};
-use clawdb::{ClawDB, ClawDBError, ClawDBResult};
-use uuid::Uuid;
+use tabled::Tabled;
 
-use super::{load_config, output_json};
+use crate::client::ClawDBClient;
+use crate::error::CliResult;
+use crate::output::{self, print_success, OutputFormat};
+use crate::types::{BranchRecord, DiffResult, MergeResult};
 
 #[derive(Debug, Clone, Args)]
 pub struct BranchArgs {
     #[command(subcommand)]
     pub command: BranchCommand,
-    #[arg(long)]
-    pub agent_id: Option<Uuid>,
-    #[arg(long, default_value = "assistant")]
-    pub role: String,
 }
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum BranchCommand {
+    /// Create a new branch.
     Create {
         name: String,
         #[arg(long)]
-        description: Option<String>,
-        #[arg(long = "from", default_value = "trunk")]
-        from_parent: String,
+        from: Option<String>,
     },
+    /// List branches.
     List {
-        #[arg(long)]
-        all: bool,
+        #[arg(long, value_enum)]
+        status: Option<BranchStatus>,
     },
-    Diff {
-        branch_a: String,
-        branch_b: String,
-    },
+    /// Merge one branch into another.
     Merge {
-        source: String,
-        #[arg(long = "into", default_value = "trunk")]
-        target: String,
-        #[arg(long, value_enum, default_value_t = MergeStrategy::Union)]
+        source_id: String,
+        target_id: String,
+        #[arg(long, value_enum, default_value_t = MergeStrategy::LastWrite)]
         strategy: MergeStrategy,
     },
-    Discard {
-        name: String,
+    /// Show diff between two branches.
+    Diff {
+        source_id: String,
+        target_id: String,
     },
+    /// Discard a branch.
+    Discard { branch_id: String },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
+pub enum BranchStatus {
+    Active,
+    Merged,
+    Discarded,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq)]
 pub enum MergeStrategy {
-    Ours,
+    #[value(name = "last-write")]
+    LastWrite,
+    #[value(name = "source-wins")]
+    SourceWins,
     Theirs,
-    Union,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct BranchRecord {
-    id: Uuid,
-    parent: String,
-    description: Option<String>,
-    created_at: String,
-    status: String,
-}
-
-fn index_path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("branches").join("cli_index.json")
-}
-
-fn load_index(data_dir: &std::path::Path) -> ClawDBResult<BTreeMap<String, BranchRecord>> {
-    let path = index_path(data_dir);
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let raw = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&raw).map_err(|e| ClawDBError::Config(e.to_string()))?)
-}
-
-fn save_index(data_dir: &std::path::Path, index: &BTreeMap<String, BranchRecord>) -> ClawDBResult<()> {
-    let path = index_path(data_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let raw = serde_json::to_string_pretty(index)?;
-    fs::write(path, raw)?;
-    Ok(())
-}
-
-fn resolve_branch(input: &str, index: &BTreeMap<String, BranchRecord>) -> Option<Uuid> {
-    if let Ok(id) = Uuid::parse_str(input) {
-        return Some(id);
-    }
-    index.get(input).map(|r| r.id)
-}
-
-pub async fn run(args: BranchArgs, data_dir: PathBuf) -> ClawDBResult<()> {
-    let cfg = load_config(&data_dir)?;
-    let agent_id = args.agent_id.unwrap_or(cfg.agent_id);
-    let db = ClawDB::open(&data_dir).await?;
-    let session = db
-        .session(agent_id, &args.role, vec!["branch:write".to_string(), "branch:read".to_string()])
-        .await?;
-
-    let mut index = load_index(&data_dir)?;
-
-    match args.command {
-        BranchCommand::Create {
-            name,
-            description,
-            from_parent,
-        } => {
-            let id = db.branch(&session, &name).await?;
-            index.insert(
-                name.clone(),
-                BranchRecord {
-                    id,
-                    parent: from_parent.clone(),
-                    description,
-                    created_at: Utc::now().to_rfc3339(),
-                    status: "active".to_string(),
-                },
-            );
-            save_index(&data_dir, &index)?;
-            println!("Created branch '{}' from '{}' (id: {})", name, from_parent, id);
+impl std::fmt::Display for MergeStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MergeStrategy::LastWrite => write!(f, "last_write_wins"),
+            MergeStrategy::SourceWins => write!(f, "source_wins"),
+            MergeStrategy::Theirs => write!(f, "theirs"),
         }
-        BranchCommand::List { all } => {
-            if output_json() {
-                let rows: Vec<_> = index
-                    .iter()
-                    .filter(|(_, v)| all || v.status == "active")
-                    .map(|(name, v)| {
-                        serde_json::json!({
-                            "name": name,
-                            "status": v.status,
-                            "parent": v.parent,
-                            "created_at": v.created_at,
-                            "id": v.id,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&rows)?);
-            } else {
-                println!("{:<24} {:<10} {:<24} {}", "NAME", "STATUS", "PARENT", "CREATED_AT");
-                for (name, rec) in index.iter().filter(|(_, v)| all || v.status == "active") {
-                    println!("{:<24} {:<10} {:<24} {}", name, rec.status, rec.parent, rec.created_at);
+    }
+}
+
+#[derive(Tabled, Clone)]
+struct BranchRow {
+    #[tabled(rename = "ID")]
+    id: String,
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Status")]
+    status: String,
+    #[tabled(rename = "Created At")]
+    created_at: String,
+}
+
+pub async fn execute(
+    args: BranchArgs,
+    client: &ClawDBClient,
+    fmt: &OutputFormat,
+    quiet: bool,
+) -> CliResult<()> {
+    match args.command {
+        BranchCommand::Create { name, from } => {
+            let mut body = serde_json::json!({ "name": name });
+            if let Some(parent) = from {
+                body["from"] = serde_json::Value::String(parent);
+            }
+            let branch: BranchRecord = client.post("/v1/branches", &body).await?;
+            print_success(&format!("Branch created (id: {})", branch.id), fmt, quiet);
+        }
+
+        BranchCommand::List { status } => {
+            let path = match status {
+                Some(s) => format!("/v1/branches?status={}", status_str(s)),
+                None => "/v1/branches".to_string(),
+            };
+            let branches: Vec<BranchRecord> = client.get(&path).await?;
+            match output::effective_format(fmt) {
+                OutputFormat::Json => output::print_json(&branches, quiet),
+                OutputFormat::Tsv => {
+                    let rows = to_rows(&branches);
+                    output::print_tsv(&rows, quiet);
+                }
+                OutputFormat::Table => {
+                    let rows = to_rows(&branches);
+                    output::print_table(&rows, quiet);
                 }
             }
         }
-        BranchCommand::Diff { branch_a, branch_b } => {
-            let a = resolve_branch(&branch_a, &index)
-                .ok_or_else(|| ClawDBError::Config(format!("unknown branch: {branch_a}")))?;
-            let b = resolve_branch(&branch_b, &index)
-                .ok_or_else(|| ClawDBError::Config(format!("unknown branch: {branch_b}")))?;
-            let diff = db.diff(&session, a, b).await?;
-            let added = diff["added"].as_i64().unwrap_or(0);
-            let removed = diff["removed"].as_i64().unwrap_or(0);
-            let modified = diff["modified"].as_i64().unwrap_or(0);
-            let divergence = diff["divergence_score"].as_f64().unwrap_or(0.0);
-            println!(
-                "+{} -{} ~{} (divergence: {:.2})",
-                added, removed, modified, divergence
-            );
-        }
+
         BranchCommand::Merge {
-            source,
-            target,
+            source_id,
+            target_id,
             strategy,
         } => {
-            let src = resolve_branch(&source, &index)
-                .ok_or_else(|| ClawDBError::Config(format!("unknown branch: {source}")))?;
-            let dst = resolve_branch(&target, &index)
-                .ok_or_else(|| ClawDBError::Config(format!("unknown branch: {target}")))?;
-            db.merge(&session, src, dst).await?;
-            println!(
-                "Merged '{}' into '{}' using {:?}",
-                source,
-                target,
-                strategy
-            );
+            let body = serde_json::json!({
+                "target_id": target_id,
+                "strategy": strategy.to_string(),
+            });
+            let result: MergeResult = client
+                .post(&format!("/v1/branches/{}/merge", source_id), &body)
+                .await?;
+            if !quiet {
+                println!("merged: {}  conflicts: {}", result.merged, result.conflicts);
+            }
         }
-        BranchCommand::Discard { name } => {
-            let rec = index
-                .get_mut(&name)
-                .ok_or_else(|| ClawDBError::Config(format!("unknown branch: {name}")))?;
-            rec.status = "discarded".to_string();
-            save_index(&data_dir, &index)?;
-            println!("Discarded branch '{}'", name);
+
+        BranchCommand::Diff {
+            source_id,
+            target_id,
+        } => {
+            let result: DiffResult = client
+                .get(&format!(
+                    "/v1/branches/{}/diff?target={}",
+                    source_id, target_id
+                ))
+                .await?;
+            if !quiet {
+                println!(
+                    "+{} modified:{} -{}",
+                    result.added, result.modified, result.removed
+                );
+            }
+        }
+
+        BranchCommand::Discard { branch_id } => {
+            client
+                .delete(&format!("/v1/branches/{}", branch_id))
+                .await?;
+            print_success(&format!("Branch {} discarded", branch_id), fmt, quiet);
         }
     }
+    Ok(())
+}
 
-    db.close().await
+fn to_rows(branches: &[BranchRecord]) -> Vec<BranchRow> {
+    branches
+        .iter()
+        .map(|b| BranchRow {
+            id: b.id.clone(),
+            name: b.name.clone(),
+            status: b.status.clone(),
+            created_at: b.created_at.clone().unwrap_or_default(),
+        })
+        .collect()
+}
+
+fn status_str(s: BranchStatus) -> &'static str {
+    match s {
+        BranchStatus::Active => "active",
+        BranchStatus::Merged => "merged",
+        BranchStatus::Discarded => "discarded",
+    }
 }

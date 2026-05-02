@@ -1,85 +1,79 @@
-//! `clawdb start` — run the full ClawDB runtime servers.
+//! `clawdb start` — spawn the clawdb-server binary as a subprocess.
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use clap::Args;
-use clawdb::{api, ClawDB, ClawDBResult};
-use tokio_util::sync::CancellationToken;
 
-use super::load_config;
+use crate::error::{CliError, CliResult};
+use crate::output::{print_success, OutputFormat};
 
 #[derive(Debug, Clone, Args)]
 pub struct StartArgs {
+    /// gRPC port.
     #[arg(long, default_value_t = 50050)]
     pub grpc_port: u16,
+
+    /// HTTP REST port.
     #[arg(long, default_value_t = 8080)]
     pub http_port: u16,
+
+    /// Prometheus metrics port.
     #[arg(long, default_value_t = 9090)]
     pub metrics_port: u16,
+
+    /// Run in the foreground (inherits stdio, blocks until exit).
     #[arg(long)]
-    pub no_http: bool,
+    pub foreground: bool,
+
+    /// Path to a server config file.
     #[arg(long)]
-    pub no_metrics: bool,
+    pub config: Option<PathBuf>,
 }
 
-pub async fn run(args: StartArgs, data_dir: PathBuf) -> ClawDBResult<()> {
-    let mut cfg = load_config(&data_dir)?;
-    cfg.data_dir = data_dir;
-    cfg.server.grpc_port = args.grpc_port;
-    cfg.server.http_port = args.http_port;
-    cfg.telemetry.metrics_port = if args.no_metrics { 0 } else { args.metrics_port };
+pub async fn execute(args: StartArgs, fmt: &OutputFormat, quiet: bool) -> CliResult<()> {
+    // Try to find clawdb-server next to the current executable first.
+    let server_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("clawdb-server")))
+        .unwrap_or_else(|| PathBuf::from("clawdb-server"));
 
-    let db = Arc::new(ClawDB::new(cfg.clone()).await?);
+    let mut cmd = std::process::Command::new(&server_bin);
+    cmd.arg("--grpc-port")
+        .arg(args.grpc_port.to_string())
+        .arg("--http-port")
+        .arg(args.http_port.to_string())
+        .arg("--metrics-port")
+        .arg(args.metrics_port.to_string());
 
-    println!("ClawDB {} running", env!("CARGO_PKG_VERSION"));
-    println!("  gRPC: localhost:{}", cfg.server.grpc_port);
-    if !args.no_http {
-        println!("  HTTP: localhost:{}", cfg.server.http_port);
+    if let Some(cfg_path) = &args.config {
+        cmd.arg("--config").arg(cfg_path);
     }
-    if !args.no_metrics {
-        println!("  Metrics: localhost:{}", cfg.telemetry.metrics_port);
-    }
 
-    let shutdown = CancellationToken::new();
-    let grpc_shutdown = shutdown.child_token();
-    let http_shutdown = shutdown.child_token();
-
-    let grpc_db = db.clone();
-    let grpc_cfg = cfg.server.clone();
-    let grpc_task = tokio::spawn(async move { api::grpc::serve(grpc_db, &grpc_cfg, grpc_shutdown).await });
-
-    let http_task = if args.no_http {
-        None
-    } else {
-        let http_db = db.clone();
-        let http_cfg = cfg.server.clone();
-        Some(tokio::spawn(async move {
-            api::http::serve(http_db, &http_cfg, http_shutdown).await
-        }))
-    };
-
-    #[cfg(unix)]
-    let wait_signal = async {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to bind SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+    if args.foreground {
+        // Inherit stdio — this call blocks.
+        let status = cmd.status()?;
+        if !status.success() {
+            let code = status.code().unwrap_or(1);
+            return Err(CliError::Other(format!(
+                "clawdb-server exited with code {code}"
+            )));
         }
-    };
+    } else {
+        // Detach from stdio and background the process.
+        let child = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        let pid = child.id();
 
-    #[cfg(not(unix))]
-    let wait_signal = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
+        // Write PID file.
+        let pid_dir = crate::config::CliConfig::config_dir();
+        std::fs::create_dir_all(&pid_dir)?;
+        std::fs::write(pid_dir.join("server.pid"), pid.to_string())?;
 
-    wait_signal.await;
-    shutdown.cancel();
-
-    let _ = grpc_task.await;
-    if let Some(task) = http_task {
-        let _ = task.await;
+        print_success(&format!("ClawDB server started (pid: {pid})"), fmt, quiet);
     }
 
-    db.close().await
+    Ok(())
 }

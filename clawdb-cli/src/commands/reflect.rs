@@ -1,95 +1,100 @@
-//! `clawdb reflect` — run and optionally watch reflection jobs.
+//! `clawdb reflect` — POST /v1/reflect and poll job status with a spinner.
 
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use clawdb::{ClawDB, ClawDBResult};
+use indicatif::{ProgressBar, ProgressStyle};
 use uuid::Uuid;
 
-use super::load_config;
+use crate::client::ClawDBClient;
+use crate::error::CliResult;
+use crate::output::{print_success, OutputFormat};
+use crate::types::ReflectJob;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum ReflectJobType {
+pub enum ReflectJobKind {
     Full,
     Summarise,
     Extract,
-    Deduplicate,
+    Decay,
+    All,
+}
+
+impl std::fmt::Display for ReflectJobKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReflectJobKind::Full => write!(f, "full"),
+            ReflectJobKind::Summarise => write!(f, "summarise"),
+            ReflectJobKind::Extract => write!(f, "extract"),
+            ReflectJobKind::Decay => write!(f, "decay"),
+            ReflectJobKind::All => write!(f, "all"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct ReflectArgs {
-    #[arg(long, value_enum, default_value_t = ReflectJobType::Full)]
-    pub job_type: ReflectJobType,
+    /// Job kind to run.
+    #[arg(long, value_enum, default_value_t = ReflectJobKind::Full)]
+    pub job: ReflectJobKind,
+
+    /// Dry-run (plan only, no changes).
     #[arg(long)]
     pub dry_run: bool,
-    #[arg(long)]
-    pub watch: bool,
+
+    /// Filter to a specific agent.
     #[arg(long)]
     pub agent_id: Option<Uuid>,
-    #[arg(long, default_value = "assistant")]
-    pub role: String,
 }
 
-pub async fn run(args: ReflectArgs, data_dir: PathBuf) -> ClawDBResult<()> {
-    let cfg = load_config(&data_dir)?;
-    let agent_id = args.agent_id.unwrap_or(cfg.agent_id);
-    let db = ClawDB::open(&data_dir).await?;
-    let _session = db
-        .session(agent_id, &args.role, vec!["reflect:run".to_string(), "memory:read".to_string()])
-        .await?;
-
-    if args.dry_run {
-        println!(
-            "Dry run: would run {:?} reflection against {}",
-            args.job_type,
-            cfg.reflect.service_url
+pub async fn execute(
+    args: ReflectArgs,
+    client: &ClawDBClient,
+    fmt: &OutputFormat,
+    quiet: bool,
+) -> CliResult<()> {
+    let pb = if !quiet {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner()),
         );
-        return db.close().await;
+        pb.enable_steady_tick(Duration::from_millis(120));
+        pb.set_message(format!("Running {} reflection…", args.job));
+        Some(pb)
+    } else {
+        None
+    };
+
+    let mut body = serde_json::json!({
+        "job": args.job.to_string(),
+        "dry_run": args.dry_run,
+    });
+    if let Some(id) = args.agent_id {
+        body["agent_id"] = serde_json::Value::String(id.to_string());
     }
 
-    let session = db
-        .session(agent_id, &args.role, vec!["reflect:run".to_string(), "memory:read".to_string()])
-        .await?;
-    let job_id = db.reflect(&session).await?;
-    println!("Reflect job started: {}", job_id);
+    let job: ReflectJob = client.post("/v1/reflect", &body).await?;
 
-    if args.watch {
-        let base = cfg.reflect.service_url.trim_end_matches('/');
-        let url = format!("{}/jobs/{}", base, job_id);
-        let client = reqwest::Client::new();
-        let mut ticks: u64 = 0;
-        loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            ticks += 1;
-            let resp = client.get(&url).send().await;
-            match resp {
-                Ok(r) => {
-                    let value: serde_json::Value = r.json().await.unwrap_or_else(|_| serde_json::json!({}));
-                    let status = value
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let progress = value
-                        .get("progress")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or((ticks as f64 % 100.0) / 100.0);
-                    let width = 30usize;
-                    let filled = ((progress.clamp(0.0, 1.0)) * width as f64).round() as usize;
-                    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width.saturating_sub(filled)));
-                    println!("[{}] {:>3}% status={}", bar, (progress * 100.0) as u64, status);
-                    if status.eq_ignore_ascii_case("completed")
-                        || status.eq_ignore_ascii_case("failed")
-                        || status.eq_ignore_ascii_case("cancelled")
-                    {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    println!("watch poll error: {}", err);
-                }
-            }
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    match fmt {
+        OutputFormat::Json => crate::output::print_json(&job, quiet),
+        _ => {
+            print_success(
+                &format!(
+                    "Reflect job {} completed — processed: {}, summaries: {}",
+                    job.job_id,
+                    job.memories_processed.unwrap_or(0),
+                    job.summaries_created.unwrap_or(0)
+                ),
+                fmt,
+                quiet,
+            );
         }
     }
 
-    db.close().await
+    Ok(())
 }
