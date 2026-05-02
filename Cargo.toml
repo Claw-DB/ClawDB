@@ -9,6 +9,10 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/Claw-DB/ClawDB"
+homepage = "https://github.com/Claw-DB/ClawDB"
+authors = ["Claw-DB Contributors"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -19,10 +23,10 @@ serde_json = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
-tokio-util = { version = "0.7", features = ["rt", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
 dashmap = "6"
 arc-swap = "1"
@@ -35,3 +39,19 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "request-id", "timeout"] }
 libloading = "0.8"
 governor = "0.10"
+claw-core = { version = "0.1.1" }
+claw-vector = { version = "0.1.1" }
+claw-branch = { version = "0.1.1" }
+claw-sync = { version = "0.1.1" }
+claw-guard = { version = "0.1.1" }
+claw-reflect-client = { version = "0.1.0" }
+
+# [patch.crates-io]
+# Uncomment to use local checkouts during development.
+# All paths assume repos are siblings of this directory.
+# claw-core           = { path = "../claw-core" }
+# claw-vector         = { path = "../claw-vector" }
+# claw-branch         = { path = "../claw-branch" }
+# claw-sync           = { path = "../claw-sync/claw-sync" }
+# claw-guard          = { path = "../claw-guard" }
+# claw-reflect-client = { path = "../claw-reflect/claw-reflect-client" }

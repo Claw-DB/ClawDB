@@ -5,53 +5,43 @@ services:
     build:
       context: .
       target: runtime
+    image: clawdb:local
+    restart: unless-stopped
+    env_file:
+      - .env
     ports:
       - "50050:50050"
       - "8080:8080"
       - "9090:9090"
-    env_file:
-      - .env
+    environment:
+      CLAW_DATA_DIR: /home/clawdb/.clawdb
+      CLAW_GRPC_PORT: 50050
+      CLAW_HTTP_PORT: 8080
+      CLAW_METRICS_PORT: 9090
     volumes:
       - clawdb_data:/home/clawdb/.clawdb
+    tmpfs:
+      - /tmp
     healthcheck:
       test: ["CMD-SHELL", "clawdb-cli status --json 2>/dev/null | grep -q '\"ok\":true'"]
       interval: 30s
       timeout: 5s
+      start_period: 20s
       retries: 3
-    depends_on:
-      - postgres
-      - redis
-
-  claw-reflect:
-    image: claw-reflect:latest
-    ports:
-      - "8090:8090"
-    env_file:
-      - .env.reflect
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: clawdb
-      POSTGRES_USER: clawdb
-      POSTGRES_PASSWORD: clawdb
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redisdata:/data
 
   prometheus:
     image: prom/prometheus:latest
+    restart: unless-stopped
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9091:9090"
+    depends_on:
+      - clawdb
 
   grafana:
     image: grafana/grafana:latest
+    restart: unless-stopped
     ports:
       - "3000:3000"
     volumes:
@@ -62,6 +52,4 @@ services:
 
 volumes:
   clawdb_data:
-  pgdata:
-  redisdata:
   grafana_data:

@@ -1,41 +1,26 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: clawdb-http
-spec:
-  type: LoadBalancer
-  selector:
-    app: clawdb
-  ports:
-    - name: http
-      protocol: TCP
-      port: 8080
-      targetPort: 8080
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: clawdb-grpc
+  name: clawdb-server
+  namespace: clawdb
+  labels:
+    app.kubernetes.io/name: clawdb
+    app.kubernetes.io/component: server
 spec:
   type: ClusterIP
   selector:
-    app: clawdb
+    app.kubernetes.io/name: clawdb
+    app.kubernetes.io/component: server
   ports:
     - name: grpc
       protocol: TCP
       port: 50050
-      targetPort: 50050
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: clawdb-metrics
-spec:
-  type: ClusterIP
-  selector:
-    app: clawdb
-  ports:
+      targetPort: grpc
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: http
     - name: metrics
       protocol: TCP
       port: 9090
-      targetPort: 9090
+      targetPort: metrics

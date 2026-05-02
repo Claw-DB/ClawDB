@@ -22,6 +22,56 @@ ClawDB is a production-grade memory runtime that unifies durable storage, semant
 | Reflection (`claw-reflect`) | ✅ | Automated distillation, summarization, and memory curation jobs |
 | Governance (`claw-guard`) | ✅ | Role and policy enforcement, scoped sessions, and access control |
 
+## Workspace Crates
+
+ClawDB is a multi-crate workspace. Each crate has a focused responsibility and can be consumed independently when needed.
+
+| Crate | Type | Purpose | Main Artifact |
+| --- | --- | --- | --- |
+| `clawdb` | Library + bin | Unified runtime facade over memory, search, branch, sync, and guard | `libclawdb` + `clawdb` |
+| `clawdb-server` | Binary + lib | Network server exposing HTTP + gRPC APIs and metrics | `clawdb-server` |
+| `clawdb-cli` | Binary | Pure HTTP client for operational and developer workflows | `clawdb` / `clawdb-cli` |
+
+### `clawdb` (Runtime API)
+
+The `clawdb` crate is the top-level API for embedding ClawDB in Rust applications.
+
+- Exposes session-oriented methods (`session`, `validate_session`, `revoke_session`)
+- Exposes memory methods (`remember`, `remember_typed`, `search`, `recall`)
+- Exposes branch methods (`branch`, `fork_branch`, `merge`, `diff`, `list_branches`)
+- Exposes sync/reflect entrypoints (`sync`, `reflect`)
+- Exposes health and telemetry hooks (`health`, `metrics_handle`)
+
+Primary path in this repo: `clawdb/src`.
+
+### `clawdb-server` (HTTP + gRPC Surface)
+
+The `clawdb-server` crate hosts the runtime as network services.
+
+- HTTP API for clients and automation
+- gRPC API with reflection support
+- Prometheus metrics endpoints
+- Config-driven startup with env overrides
+
+Primary paths in this repo:
+
+- `clawdb-server/src/http`
+- `clawdb-server/src/grpc`
+- `clawdb-server/src/state.rs`
+
+### `clawdb-cli` (Pure HTTP Client)
+
+The `clawdb-cli` crate is intentionally decoupled from runtime internals.
+
+- Talks to `clawdb-server` over HTTP only
+- No direct linkage to component crates at call time
+- Supports table/json/tsv output modes
+- Includes commands for init, status, remember/search/recall, branches, sync, reflect, policy, config, session, completion
+
+Primary path in this repo: `clawdb-cli/src`.
+
+This design keeps the CLI small and stable while allowing server/runtime internals to evolve independently.
+
 ## Quick Start
 
 1. Add the crate:
