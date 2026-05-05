@@ -63,16 +63,19 @@ async fn run(cli: Cli, cfg: CliConfig, fmt: &OutputFormat, quiet: bool) -> Resul
     match cli.command {
         Commands::Init(args) => commands::init::execute(args, fmt, quiet).await,
         Commands::Start(args) => commands::start::execute(args, fmt, quiet).await,
+        Commands::Stop(args) => commands::stop::execute(args, fmt, quiet).await,
         Commands::Status(args) => commands::status::execute(args, &client, fmt, quiet).await,
         Commands::Session(args) => commands::session::execute(args, &client, fmt, quiet).await,
         Commands::Remember(args) => commands::remember::execute(args, &client, fmt, quiet).await,
         Commands::Search(args) => commands::search::execute(args, &client, fmt, quiet).await,
         Commands::Recall(args) => commands::recall::execute(args, &client, fmt, quiet).await,
+        Commands::Memory(args) => commands::memory::execute(args, &client, fmt, quiet).await,
         Commands::Branch(args) => commands::branch::execute(args, &client, fmt, quiet).await,
         Commands::Sync(args) => commands::sync::execute(args, &client, fmt, quiet).await,
         Commands::Reflect(args) => commands::reflect::execute(args, &client, fmt, quiet).await,
         Commands::Policy(args) => commands::policy::execute(args, &client, fmt, quiet).await,
         Commands::Config(args) => commands::config::execute(args, fmt, quiet).await,
+        Commands::Mcp(args) => commands::mcp::execute(args, fmt, quiet).await,
         Commands::Completion(args) => {
             let mut app = <Cli as clap::CommandFactory>::command();
             commands::completion::execute(args, &mut app);

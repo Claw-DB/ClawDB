@@ -9,7 +9,7 @@ use axum::{
     Extension, Json, Router,
 };
 use clawdb::{prelude::MergeStrategy, ClawDBError};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tower_http::{
     limit::RequestBodyLimitLayer, normalize_path::NormalizePathLayer,
     set_header::SetResponseHeaderLayer,
@@ -21,19 +21,13 @@ use crate::{
     state::{AppState, RequestId},
 };
 
-#[derive(Serialize)]
-struct SessionResponse {
-    id: String,
-    token: String,
-    expires_at: String,
-    scopes: Vec<String>,
-}
-
 #[derive(Deserialize)]
 struct CreateSessionBody {
     agent_id: Uuid,
     role: String,
     scopes: Vec<String>,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +50,14 @@ struct SearchQuery {
     semantic: bool,
 }
 
+#[derive(Deserialize)]
+struct ListMemoriesQuery {
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 fn default_top_k() -> usize {
     10
 }
@@ -69,6 +71,7 @@ struct BranchBody {
 
 #[derive(Deserialize)]
 struct MergeBody {
+    #[serde(alias = "target_id")]
     target: Uuid,
     #[serde(default)]
     strategy: Option<String>,
@@ -82,17 +85,20 @@ struct DiffQuery {
 pub fn router(state: Arc<AppState>) -> Router {
     let public = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/ready", get(ready))
+        .route("/v1/sessions", post(create_session))
         .route("/v1/metrics", get(metrics));
 
     let protected = Router::new()
-        .route("/v1/sessions", post(create_session))
+        .route("/v1/sessions/me", get(whoami))
         .route("/v1/sessions/:id", delete(revoke_session))
-        .route("/v1/memories", post(remember))
+        .route("/v1/memories", post(remember).get(list_memories))
         .route("/v1/memories/search", get(search))
-        .route("/v1/memories/:id", get(recall_one))
+        .route("/v1/memories/:id", get(recall_one).delete(delete_memory))
         .route("/v1/branches", post(create_branch).get(list_branches))
         .route("/v1/branches/:id/merge", post(merge_branch))
         .route("/v1/branches/:id/diff", get(diff_branch))
+        .route("/v1/branches/:id", delete(discard_branch))
         .route("/v1/sync", post(sync))
         .route("/v1/reflect", post(reflect))
         .layer(middleware::from_fn_with_state(
@@ -143,6 +149,14 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+async fn ready(State(state): State<Arc<AppState>>) -> Response {
+    match state.db.health().await {
+        Ok(report) if report.ok => StatusCode::OK.into_response(),
+        Ok(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(error) => map_error(error, None),
+    }
+}
+
 async fn metrics(State(state): State<Arc<AppState>>) -> Response {
     if let Ok(count) = state.db.active_session_count().await {
         state.metrics.set_active_sessions(count);
@@ -161,24 +175,44 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
 
 async fn create_session(
     State(state): State<Arc<AppState>>,
-    Extension(_auth): Extension<AuthContext>,
     Extension(request_id): Extension<RequestId>,
     Json(body): Json<CreateSessionBody>,
 ) -> Response {
     match state
         .db
-        .session(body.agent_id, &body.role, body.scopes)
+        .session_with_ttl(
+            body.agent_id,
+            &body.role,
+            body.scopes,
+            body.ttl_secs.unwrap_or(3600) as i64,
+        )
         .await
     {
-        Ok(session) => Json(SessionResponse {
-            id: session.id.to_string(),
-            token: session.token,
-            expires_at: session.expires_at.to_rfc3339(),
-            scopes: session.scopes,
-        })
+        Ok(session) => Json(serde_json::json!({
+            "id": session.id,
+            "session_id": session.id,
+            "agent_id": session.agent_id,
+            "role": session.role,
+            "token": session.token,
+            "expires_at": session.expires_at.to_rfc3339(),
+            "scopes": session.scopes,
+        }))
         .into_response(),
         Err(error) => map_error(error, Some(request_id.0)),
     }
+}
+
+async fn whoami(Extension(auth): Extension<AuthContext>) -> Response {
+    Json(serde_json::json!({
+        "id": auth.session.id,
+        "session_id": auth.session.id,
+        "agent_id": auth.session.agent_id,
+        "role": auth.session.role,
+        "token": auth.session.token,
+        "expires_at": auth.session.expires_at.to_rfc3339(),
+        "scopes": auth.session.scopes,
+    }))
+    .into_response()
 }
 
 async fn revoke_session(
@@ -256,6 +290,39 @@ async fn recall_one(
     }
 }
 
+async fn list_memories(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Query(query): Query<ListMemoriesQuery>,
+) -> Response {
+    match state
+        .db
+        .list_memories(&auth.session, query.r#type.as_deref())
+        .await
+    {
+        Ok(mut memories) => {
+            if let Some(limit) = query.limit {
+                memories.truncate(limit);
+            }
+            Json(memories).into_response()
+        }
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn delete_memory(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match state.db.delete_memory(&auth.session, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
 async fn create_branch(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -268,7 +335,7 @@ async fn create_branch(
         state.db.branch(&auth.session, &body.name).await
     };
     match branch {
-        Ok(id) => Json(serde_json::json!({"branch_id": id, "name": body.name})).into_response(),
+        Ok(id) => Json(serde_json::json!({"id": id, "branch_id": id, "name": body.name})).into_response(),
         Err(error) => map_error(error, Some(request_id.0)),
     }
 }
@@ -315,6 +382,18 @@ async fn diff_branch(
 ) -> Response {
     match state.db.diff(&auth.session, id, query.target).await {
         Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn discard_branch(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match state.db.discard_branch(&auth.session, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => map_error(error, Some(request_id.0)),
     }
 }

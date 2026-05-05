@@ -48,6 +48,7 @@ pub struct HealthResponse {
 /// Session info returned by the server.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SessionInfo {
+    #[serde(default, alias = "id")]
     pub session_id: String,
     pub token: String,
     #[serde(default)]
@@ -62,6 +63,7 @@ pub struct SessionInfo {
 /// A branch record.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BranchRecord {
+    #[serde(alias = "branch_id")]
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -132,5 +134,6 @@ pub struct PolicyTestResult {
 /// Response body from POST /v1/memories.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CreateMemoryResponse {
+    #[serde(alias = "memory_id")]
     pub id: String,
 }

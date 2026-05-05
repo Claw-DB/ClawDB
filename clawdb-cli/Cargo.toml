@@ -1,6 +1,6 @@
 [package]
 name          = "clawdb-cli"
-version       = "0.1.0"
+version       = "0.1.2"
 edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
@@ -8,15 +8,17 @@ repository.workspace   = true
 homepage.workspace     = true
 authors.workspace      = true
 description   = "Command-line interface for the ClawDB cognitive database."
+documentation = "https://docs.rs/clawdb-cli"
+readme        = "README.md"
+keywords      = ["clawdb", "cli", "ai", "memory", "agent"]
+categories    = ["command-line-utilities", "database"]
+exclude       = ["target/", ".github/"]
 default-run   = "clawdb"
 
 [[bin]]
 name = "clawdb"
 path = "src/main.rs"
-
-[[bin]]
-name = "clawdb-cli"
-path = "src/main.rs"
+doc = false
 
 [dependencies]
 clap          = { version = "4", features = ["derive", "env", "string", "wrap_help"] }
@@ -32,7 +34,7 @@ tracing-subscriber = { workspace = true }
 thiserror     = { workspace = true }
 toml          = "0.8"
 dirs          = "5"
-tabled        = "0.14"
+tabled        = "0.15"
 indicatif     = "0.17"
 dialoguer     = "0.11"
 colored       = "2"

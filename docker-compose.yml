@@ -28,9 +28,17 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.25"
+          memory: 256m
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.54.1
     restart: unless-stopped
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -38,9 +46,17 @@ services:
       - "9091:9090"
     depends_on:
       - clawdb
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.2.2
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -49,6 +65,14 @@ services:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
 
 volumes:
   clawdb_data:

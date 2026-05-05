@@ -1,6 +1,6 @@
 [package]
 name = "clawdb"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 description = "The cognitive database for AI agents — unified memory, semantic retrieval, branching, sync, and governance."
 documentation = "https://docs.rs/clawdb"
-readme = "../README.md"
+readme = "README.md"
 keywords = ["database", "ai", "agents", "memory", "cognitive"]
 categories = ["database", "asynchronous"]
 exclude = ["target/", "benches/", ".github/"]
@@ -19,7 +19,7 @@ name = "clawdb"
 path = "src/lib.rs"
 
 [[bin]]
-name = "clawdb"
+name = "clawdb-dev"
 path = "src/bin/clawdb.rs"
 
 [dependencies]
@@ -60,6 +60,7 @@ notify = "6"
 reqwest = { version = "0.12", features = ["json"] }
 anyhow = "1"
 cfg-if = "1"
+secrecy = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio-rustls"] }
 
 [build-dependencies]

@@ -10,7 +10,7 @@ use wiremock::{
 };
 
 fn clawdb() -> Command {
-    Command::cargo_bin("clawdb-cli").expect("binary not found")
+    Command::cargo_bin("clawdb").expect("binary not found")
 }
 
 // ─── Basic CLI meta-tests ──────────────────────────────────────────────────
@@ -260,4 +260,19 @@ async fn test_status_degraded() {
         stdout.contains("\"ok\": false") || stdout.contains("\"vector\": false"),
         "should include degraded component in output: {stdout}"
     );
+}
+
+#[test]
+fn test_mcp_print_config_claude_json() {
+    let out = clawdb()
+        .args(["mcp", "print-config", "--host", "claude"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out).expect("output should be valid JSON");
+    assert!(parsed.get("command").is_some());
 }

@@ -14,7 +14,7 @@ use crate::state::AppState;
 pub const VERSION_TEXT: &str = concat!(
     "clawdb-server ",
     env!("CARGO_PKG_VERSION"),
-    "\ncomponents: claw-core/0.1.0 claw-vector/0.1.0 claw-branch/0.1.0\n            claw-sync/0.1.0 claw-guard/0.1.0 claw-reflect-client/0.1.0"
+    "\ncomponents: claw-core/0.1.2 claw-vector/0.1.2 claw-branch/0.1.2\n            claw-sync/0.1.2 claw-guard/0.1.2 claw-reflect-client/0.1.2"
 );
 
 #[derive(Clone, Debug)]

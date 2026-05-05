@@ -6,10 +6,13 @@ use std::{
 use clawdb::ClawDBConfig;
 use clawdb_server::{
     build_state,
-    grpc::service::proto::{claw_db_service_client::ClawDbServiceClient, HealthRequest},
+    grpc::service::proto::{
+        claw_db_service_client::ClawDbServiceClient, HealthRequest, RememberRequest, SearchRequest,
+    },
     spawn_servers, ServerOptions,
 };
 use tempfile::tempdir;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn server_exposes_http_grpc_and_metrics() -> anyhow::Result<()> {
@@ -22,6 +25,14 @@ async fn server_exposes_http_grpc_and_metrics() -> anyhow::Result<()> {
     config.sync.hub_url = None;
 
     let state = build_state(config).await?;
+    let session = state
+        .db
+        .session(
+            Uuid::new_v4(),
+            "agent",
+            vec!["memory:write".to_string(), "memory:read".to_string()],
+        )
+        .await?;
     let servers = spawn_servers(
         state,
         ServerOptions {
@@ -40,6 +51,9 @@ async fn server_exposes_http_grpc_and_metrics() -> anyhow::Result<()> {
     let health = get_with_retry(&client, &format!("{http_base}/v1/health")).await?;
     assert!(health.status().is_success());
 
+    let ready = get_with_retry(&client, &format!("{http_base}/v1/ready")).await?;
+    assert!(ready.status().is_success());
+
     let unauthorized = client
         .post(format!("{http_base}/v1/memories"))
         .json(&serde_json::json!({ "content": "blocked" }))
@@ -51,6 +65,37 @@ async fn server_exposes_http_grpc_and_metrics() -> anyhow::Result<()> {
     let grpc_health = grpc.health(tonic::Request::new(HealthRequest {})).await?;
     assert!(grpc_health.get_ref().ok);
     assert!(!grpc_health.get_ref().request_id.is_empty());
+
+    let unauth = grpc
+        .remember(tonic::Request::new(RememberRequest {
+            content: "unauthorized".to_string(),
+        }))
+        .await
+        .expect_err("missing token should be rejected");
+    assert_eq!(unauth.code(), tonic::Code::Unauthenticated);
+
+    let mut remember_req = tonic::Request::new(RememberRequest {
+        content: "grpc memory".to_string(),
+    });
+    remember_req.metadata_mut().insert(
+        "x-claw-session",
+        tonic::metadata::MetadataValue::try_from(session.token.as_str())?,
+    );
+    let remember_resp = grpc.remember(remember_req).await?;
+    assert!(!remember_resp.get_ref().memory_id.is_empty());
+
+    let mut search_req = tonic::Request::new(SearchRequest {
+        query: "grpc memory".to_string(),
+        top_k: 5,
+        semantic: false,
+        filter_json: String::new(),
+    });
+    search_req.metadata_mut().insert(
+        "x-claw-session",
+        tonic::metadata::MetadataValue::try_from(session.token.as_str())?,
+    );
+    let search_resp = grpc.search(search_req).await?;
+    assert!(!search_resp.get_ref().hits.is_empty());
 
     let metrics = get_with_retry(&client, &metrics_url).await?;
     assert!(metrics.status().is_success());

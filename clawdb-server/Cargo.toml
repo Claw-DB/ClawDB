@@ -1,6 +1,6 @@
 [package]
 name = "clawdb-server"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -8,13 +8,18 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 description = "gRPC and HTTP server for the ClawDB cognitive database."
+documentation = "https://docs.rs/clawdb-server"
+readme = "README.md"
+keywords = ["clawdb", "grpc", "http", "ai", "database"]
+categories = ["web-programming", "database"]
+exclude = ["target/", ".github/"]
 
 [[bin]]
 name = "clawdb-server"
 path = "src/main.rs"
 
 [dependencies]
-clawdb = { path = "../clawdb", version = "0.1.0" }
+clawdb = { path = "../clawdb", version = "0.1.2" }
 tokio = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls", "tls-roots"] }
 prost = { workspace = true }

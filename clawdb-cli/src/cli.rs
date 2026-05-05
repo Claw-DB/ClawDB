@@ -2,8 +2,9 @@ use clap::{Parser, Subcommand};
 
 use crate::commands::{
     branch::BranchArgs, completion::CompletionArgs, config::ConfigCmdArgs, init::InitArgs,
-    policy::PolicyArgs, recall::RecallArgs, reflect::ReflectArgs, remember::RememberArgs,
-    search::SearchArgs, session::SessionArgs, start::StartArgs, status::StatusArgs, sync::SyncArgs,
+    mcp::McpArgs, memory::MemoryArgs, policy::PolicyArgs, recall::RecallArgs,
+    reflect::ReflectArgs, remember::RememberArgs, search::SearchArgs, session::SessionArgs,
+    start::StartArgs, status::StatusArgs, stop::StopArgs, sync::SyncArgs,
 };
 use crate::output::OutputFormat;
 
@@ -41,6 +42,8 @@ pub enum Commands {
     Init(InitArgs),
     /// Start the ClawDB server process.
     Start(StartArgs),
+    /// Stop a detached ClawDB server process.
+    Stop(StopArgs),
     /// Check server component health.
     Status(StatusArgs),
     /// Manage sessions (create / revoke / whoami).
@@ -51,6 +54,8 @@ pub enum Commands {
     Search(SearchArgs),
     /// Retrieve one or more memories by ID.
     Recall(RecallArgs),
+    /// Grouped memory commands (remember/search/list/delete).
+    Memory(MemoryArgs),
     /// Manage memory branches (create / list / merge / diff / discard).
     Branch(BranchArgs),
     /// Synchronise memories with the hub.
@@ -61,6 +66,8 @@ pub enum Commands {
     Policy(PolicyArgs),
     /// Read or write local CLI configuration.
     Config(ConfigCmdArgs),
+    /// Install/print MCP editor configuration.
+    Mcp(McpArgs),
     /// Generate shell completion scripts.
     Completion(CompletionArgs),
 }

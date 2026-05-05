@@ -4,6 +4,7 @@ use std::{path::Path, sync::Arc, time::Instant};
 
 use anyhow::Context;
 use claw_guard::error::GuardError;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::Executor;
@@ -157,15 +158,14 @@ impl ClawDB {
         );
 
         let guard_config = claw_guard::GuardConfig {
-            db_path: config.guard.db_path.clone(),
-            jwt_secret: claw_guard::ZeroizeString::new(config.guard.jwt_secret.clone()),
-            policy_dir: config.guard.policy_dir.clone(),
-            tls_cert_path: config.guard.tls_cert_path.clone(),
-            tls_key_path: config.guard.tls_key_path.clone(),
-            risk_thresholds: claw_guard::RiskThresholds::default(),
+            db_path: config.guard.db_path.clone().into(),
+            jwt_secret: SecretString::new(config.guard.jwt_secret.clone().into_boxed_str()),
+            policy_dir: Some(config.guard.policy_dir.clone()),
             sensitive_resources: config.guard.sensitive_resources.clone(),
             audit_flush_interval_ms: config.guard.audit_flush_interval_ms,
             audit_batch_size: config.guard.audit_batch_size,
+            business_hours_start_hour: 8,
+            business_hours_end_hour: 18,
         };
         let guard = Arc::new(
             claw_guard::Guard::new(guard_config)
@@ -300,19 +300,25 @@ impl ClawDB {
     ) -> ClawDBResult<ClawDBSession> {
         let session = self
             .guard
-            .session_manager
-            .create_session(agent_id, role, scopes.clone(), ttl_secs)
+            .sessions()
+            .create_session(
+                agent_id,
+                self.config.workspace_id,
+                role,
+                scopes.clone(),
+                ttl_secs.max(1) as u64,
+            )
             .await?;
         self.metrics.session_created.inc();
         self.emit(ClawEvent::SessionCreated {
-            session_id: session.session_id,
+            session_id: session.id,
             agent_id,
         })
         .await;
         Ok(ClawDBSession {
-            id: session.session_id,
+            id: session.id,
             agent_id: session.agent_id,
-            workspace_id: self.config.workspace_id,
+            workspace_id: session.workspace_id,
             role: session.role,
             scopes,
             token: session.token,
@@ -486,6 +492,28 @@ impl ClawDB {
         Ok(records)
     }
 
+    /// Lists memories, optionally filtering by memory type.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn list_memories(
+        &self,
+        session: &ClawDBSession,
+        memory_type: Option<&str>,
+    ) -> ClawDBResult<Vec<MemoryRecord>> {
+        self.authorize(session, &["memory:read", "memory:*", "*"])
+            .await?;
+        let type_filter = memory_type.map(parse_memory_type);
+        Ok(self.core.list_memories(type_filter).await?)
+    }
+
+    /// Deletes a memory by id.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, memory_id = %memory_id))]
+    pub async fn delete_memory(&self, session: &ClawDBSession, memory_id: Uuid) -> ClawDBResult<()> {
+        self.authorize(session, &["memory:write", "memory:*", "*"])
+            .await?;
+        self.core.delete_memory(memory_id).await?;
+        Ok(())
+    }
+
     /// Forks a new branch from trunk.
     #[tracing::instrument(skip(self, session, name), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn branch(&self, session: &ClawDBSession, name: &str) -> ClawDBResult<Uuid> {
@@ -594,6 +622,15 @@ impl ClawDB {
         Ok(self.branch.diff(source, target).await?)
     }
 
+    /// Discards a branch.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, branch_id = %branch_id))]
+    pub async fn discard_branch(&self, session: &ClawDBSession, branch_id: Uuid) -> ClawDBResult<()> {
+        self.authorize(session, &["branch:write", "branch:*", "*"])
+            .await?;
+        self.branch.discard(branch_id).await?;
+        Ok(())
+    }
+
     /// Runs a sync round or returns a no-op summary in local-only mode.
     #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn sync(&self, session: &ClawDBSession) -> ClawDBResult<SyncSummary> {
@@ -669,11 +706,11 @@ impl ClawDB {
     /// Validates a session token.
     #[tracing::instrument(skip(self, token))]
     pub async fn validate_session(&self, token: &str) -> ClawDBResult<ClawDBSession> {
-        let session = self.guard.session_manager.validate_session(token).await?;
+        let session = self.guard.sessions().validate_session(token).await?;
         Ok(ClawDBSession {
-            id: session.session_id,
+            id: session.id,
             agent_id: session.agent_id,
-            workspace_id: self.config.workspace_id,
+            workspace_id: session.workspace_id,
             role: session.role,
             scopes: session.scopes,
             token: session.token,
@@ -685,7 +722,7 @@ impl ClawDB {
     #[tracing::instrument(skip(self))]
     pub async fn revoke_session(&self, session_id: Uuid) -> ClawDBResult<()> {
         self.guard
-            .session_manager
+            .sessions()
             .revoke_session(session_id)
             .await?;
         Ok(())
@@ -765,7 +802,7 @@ impl ClawDB {
         accepted_scopes: &[&str],
     ) -> ClawDBResult<()> {
         self.guard
-            .session_manager
+            .sessions()
             .validate_session(&session.token)
             .await
             .map_err(map_guard_session_error)?;
@@ -959,11 +996,9 @@ fn scope_matches(granted: &str, required: &str) -> bool {
 
 fn map_guard_session_error(error: GuardError) -> ClawDBError {
     match error {
-        GuardError::SessionExpired { .. }
-        | GuardError::SessionRevoked(_)
-        | GuardError::SessionNotFound(_)
-        | GuardError::TokenInvalid(_)
-        | GuardError::TokenExpired { .. } => ClawDBError::SessionInvalid,
+        GuardError::SessionExpired | GuardError::SessionRevoked | GuardError::InvalidToken => {
+            ClawDBError::SessionInvalid
+        }
         other => ClawDBError::Guard(other),
     }
 }

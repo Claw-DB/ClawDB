@@ -39,12 +39,12 @@ tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "request-id", "timeout"] }
 libloading = "0.8"
 governor = "0.10"
-claw-core = { version = "0.1.1" }
-claw-vector = { version = "0.1.1" }
-claw-branch = { version = "0.1.1" }
-claw-sync = { version = "0.1.1" }
-claw-guard = { version = "0.1.1" }
-claw-reflect-client = { version = "0.1.0" }
+claw-core = { version = "0.1.2" }
+claw-vector = { version = "0.1.2" }
+claw-branch = { version = "0.1.2" }
+claw-sync = { version = "0.1.2" }
+claw-guard = { version = "0.1.2" }
+claw-reflect-client = { version = "0.1.2" }
 
 # [patch.crates-io]
 # Uncomment to use local checkouts during development.
