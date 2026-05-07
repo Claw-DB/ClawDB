@@ -9,13 +9,13 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
           - target: aarch64-apple-darwin
@@ -30,19 +30,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install aarch64 Linux linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build
         run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} -p clawdb-server
-            cross build --release --target ${{ matrix.target }} -p clawdb-cli
-          else
-            cargo build --release --target ${{ matrix.target }} -p clawdb-server
-            cargo build --release --target ${{ matrix.target }} -p clawdb-cli
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
+          cargo build --release --target ${{ matrix.target }} -p clawdb-server
+          cargo build --release --target ${{ matrix.target }} -p clawdb-cli
         shell: bash
 
       - name: Package
@@ -59,9 +59,9 @@ jobs:
         shell: bash
         run: |
           sha256sum "clawdb-${{ matrix.target }}.tar.gz" \
-            >> checksums.txt 2>/dev/null || \
+            > "checksums-${{ matrix.target }}.txt" 2>/dev/null || \
           shasum -a 256 "clawdb-${{ matrix.target }}.tar.gz" \
-            >> checksums.txt
+            > "checksums-${{ matrix.target }}.txt"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -69,7 +69,7 @@ jobs:
           name: clawdb-${{ matrix.target }}
           path: |
             clawdb-${{ matrix.target }}.tar.gz
-            checksums.txt
+            checksums-${{ matrix.target }}.txt
 
   release:
     needs: build
@@ -82,7 +82,7 @@ jobs:
           merge-multiple: true
 
       - name: Merge checksums
-        run: cat checksums.txt | sort -u > checksums-final.txt
+        run: cat checksums-*.txt | sort -u > checksums-final.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

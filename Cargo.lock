@@ -883,6 +883,7 @@ dependencies = [
  "http",
  "prometheus-client",
  "prost 0.13.5",
+ "protoc-bin-vendored",
  "rcgen",
  "reqwest 0.12.28",
  "serde",

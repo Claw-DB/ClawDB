@@ -46,6 +46,7 @@ tonic-reflection = "0.12"
 
 [build-dependencies]
 tonic-build = { version = "0.12", features = ["prost"] }
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

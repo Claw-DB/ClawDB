@@ -13,6 +13,7 @@ env:
 
 jobs:
   publish-crates:
+    if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -35,6 +36,13 @@ jobs:
 
       - name: Publish clawdb-cli
         run: cargo publish -p clawdb-cli --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+
+  publish-crates-skipped:
+    if: ${{ secrets.CARGO_REGISTRY_TOKEN == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip publish (no token)
+        run: echo "CARGO_REGISTRY_TOKEN is not set; skipping crates publish jobs."
 
   build-binaries:
     needs: publish-crates
