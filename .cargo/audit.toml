@@ -1,0 +1,6 @@
+[advisories]
+# RUSTSEC-2023-0071: rsa crate Marvin Attack timing side-channel.
+# Affects rsa 0.9.x via sqlx-mysql and jsonwebtoken. No fixed version is
+# available upstream; ignore until the advisory is resolved or the dependency
+# is replaced.
+ignore = ["RUSTSEC-2023-0071"]

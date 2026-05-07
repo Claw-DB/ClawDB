@@ -19,6 +19,7 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo check --workspace --all-features
       - run: cargo fmt --check --all
       - run: cargo clippy --workspace --all-features -- -D warnings
@@ -40,6 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo test --workspace --all-features -- --nocapture
       - name: Upload test artifacts
         uses: actions/upload-artifact@v4
@@ -52,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo bench --workspace --no-run
 
   audit:
@@ -69,6 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo doc --workspace --no-deps --all-features
       - uses: actions/upload-artifact@v4
         with:
