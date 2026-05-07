@@ -1,0 +1,93 @@
+name: Release Binaries
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p clawdb-server
+            cross build --release --target ${{ matrix.target }} -p clawdb-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p clawdb-server
+            cargo build --release --target ${{ matrix.target }} -p clawdb-cli
+          fi
+        shell: bash
+
+      - name: Package
+        shell: bash
+        run: |
+          BINARY_DIR="target/${{ matrix.target }}/release"
+          EXT="${{ matrix.ext }}"
+          tar -czf "clawdb-${{ matrix.target }}.tar.gz" \
+            -C "$BINARY_DIR" \
+            "clawdb-server${EXT}" \
+            "clawdb${EXT}"
+
+      - name: Compute checksum
+        shell: bash
+        run: |
+          sha256sum "clawdb-${{ matrix.target }}.tar.gz" \
+            >> checksums.txt 2>/dev/null || \
+          shasum -a 256 "clawdb-${{ matrix.target }}.tar.gz" \
+            >> checksums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawdb-${{ matrix.target }}
+          path: |
+            clawdb-${{ matrix.target }}.tar.gz
+            checksums.txt
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Merge checksums
+        run: cat checksums.txt | sort -u > checksums-final.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            clawdb-*.tar.gz
+            checksums-final.txt
+          generate_release_notes: true
