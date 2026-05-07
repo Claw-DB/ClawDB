@@ -4,7 +4,7 @@ use crate::commands::{
     branch::BranchArgs, completion::CompletionArgs, config::ConfigCmdArgs, init::InitArgs,
     mcp::McpArgs, memory::MemoryArgs, policy::PolicyArgs, recall::RecallArgs,
     reflect::ReflectArgs, remember::RememberArgs, search::SearchArgs, session::SessionArgs,
-    start::StartArgs, status::StatusArgs, stop::StopArgs, sync::SyncArgs,
+    start::StartArgs, status::StatusArgs, stop::StopArgs, sync::SyncArgs, tx::TxArgs,
 };
 use crate::output::OutputFormat;
 
@@ -56,12 +56,14 @@ pub enum Commands {
     Recall(RecallArgs),
     /// Grouped memory commands (remember/search/list/delete).
     Memory(MemoryArgs),
-    /// Manage memory branches (create / list / merge / diff / discard).
+    /// Manage memory branches (create / list / get / trunk / by-name / merge / diff / archive / discard).
     Branch(BranchArgs),
     /// Synchronise memories with the hub.
     Sync(SyncArgs),
-    /// Trigger reflection jobs.
+    /// Trigger and query reflection jobs.
     Reflect(ReflectArgs),
+    /// Transaction commands (begin / stage / commit / rollback).
+    Tx(TxArgs),
     /// Manage access control policies.
     Policy(PolicyArgs),
     /// Read or write local CLI configuration.

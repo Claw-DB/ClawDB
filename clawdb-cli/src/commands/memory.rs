@@ -24,6 +24,15 @@ pub enum MemoryCommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Retrieve a memory by ID.
+    Get { id: String },
+    /// Update the content of a memory.
+    Update {
+        /// Memory ID to update.
+        id: String,
+        /// New content for the memory.
+        content: String,
+    },
     Delete { id: String },
 }
 
@@ -59,6 +68,25 @@ pub async fn execute(
         MemoryCommand::Delete { id } => {
             client.delete(&format!("/v1/memories/{id}")).await?;
             output::print_success(&format!("Deleted memory {id}"), fmt, quiet);
+            Ok(())
+        }
+        MemoryCommand::Get { id } => {
+            let mem: MemoryRecord = client.get(&format!("/v1/memories/{id}")).await?;
+            match output::effective_format(fmt) {
+                OutputFormat::Json => output::print_json(&mem, quiet),
+                _ => {
+                    let row = rows(&[mem]);
+                    output::print_table(&row, quiet);
+                }
+            }
+            Ok(())
+        }
+        MemoryCommand::Update { id, content } => {
+            let body = serde_json::json!({"content": content});
+            let _: serde_json::Value = client
+                .patch(&format!("/v1/memories/{id}"), &body)
+                .await?;
+            output::print_success(&format!("Memory {id} updated"), fmt, quiet);
             Ok(())
         }
     }

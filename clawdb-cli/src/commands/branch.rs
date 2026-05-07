@@ -27,6 +27,12 @@ pub enum BranchCommand {
         #[arg(long, value_enum)]
         status: Option<BranchStatus>,
     },
+    /// Get a branch by ID.
+    Get { branch_id: String },
+    /// Get a branch by name.
+    ByName { name: String },
+    /// Get the trunk (default) branch.
+    Trunk,
     /// Merge one branch into another.
     Merge {
         source_id: String,
@@ -39,6 +45,8 @@ pub enum BranchCommand {
         source_id: String,
         target_id: String,
     },
+    /// Archive a branch (marks it read-only).
+    Archive { branch_id: String },
     /// Discard a branch.
     Discard { branch_id: String },
 }
@@ -114,6 +122,60 @@ pub async fn execute(
                     output::print_table(&rows, quiet);
                 }
             }
+        }
+
+        BranchCommand::Get { branch_id } => {
+            let branch: BranchRecord = client.get(&format!("/v1/branches/{}", branch_id)).await?;
+            match output::effective_format(fmt) {
+                OutputFormat::Json => output::print_json(&branch, quiet),
+                _ => {
+                    if !quiet {
+                        println!("id   : {}", branch.id);
+                        println!("name : {}", branch.name);
+                        println!("status : {}", branch.status);
+                        println!("created: {}", branch.created_at.as_deref().unwrap_or("N/A"));
+                    }
+                }
+            }
+        }
+
+        BranchCommand::ByName { name } => {
+            let branch: BranchRecord = client.get(&format!("/v1/branches/by-name/{}", name)).await?;
+            match output::effective_format(fmt) {
+                OutputFormat::Json => output::print_json(&branch, quiet),
+                _ => {
+                    if !quiet {
+                        println!("id   : {}", branch.id);
+                        println!("name : {}", branch.name);
+                        println!("status : {}", branch.status);
+                    }
+                }
+            }
+        }
+
+        BranchCommand::Trunk => {
+            let branch: BranchRecord = client.get("/v1/branches/trunk").await?;
+            match output::effective_format(fmt) {
+                OutputFormat::Json => output::print_json(&branch, quiet),
+                _ => {
+                    if !quiet {
+                        println!("id   : {}", branch.id);
+                        println!("name : {}", branch.name);
+                        println!("status : {}", branch.status);
+                    }
+                }
+            }
+        }
+
+        BranchCommand::Archive { branch_id } => {
+            client
+                .post::<_, serde_json::Value>(&format!("/v1/branches/{}/archive", branch_id), &serde_json::json!({}))
+                .await
+                .or_else(|_| {
+                    // Server may return 204 No Content which the JSON parser treats as null.
+                    Ok::<serde_json::Value, crate::error::CliError>(serde_json::Value::Null)
+                })?;
+            print_success(&format!("Branch {} archived", branch_id), fmt, quiet);
         }
 
         BranchCommand::Merge {

@@ -492,6 +492,18 @@ impl ClawDB {
         Ok(records)
     }
 
+    /// Recalls a single memory by id.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, memory_id = %memory_id))]
+    pub async fn recall_one(
+        &self,
+        session: &ClawDBSession,
+        memory_id: Uuid,
+    ) -> ClawDBResult<MemoryRecord> {
+        self.authorize(session, &["memory:read", "memory:*", "*"])
+            .await?;
+        Ok(self.core.get_memory(memory_id).await?)
+    }
+
     /// Lists memories, optionally filtering by memory type.
     #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn list_memories(
@@ -931,8 +943,10 @@ impl ClawDB {
     /// Returns the number of active, non-revoked sessions recorded by guard.
     #[tracing::instrument(skip(self))]
     pub async fn active_session_count(&self) -> ClawDBResult<u64> {
+        // expires_at is stored as milliseconds since Unix epoch by claw-guard.
+        // Compare against the current Unix time in milliseconds.
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sessions WHERE revoked = 0 AND expires_at > CURRENT_TIMESTAMP",
+            "SELECT COUNT(*) FROM sessions WHERE revoked = 0 AND expires_at > (strftime('%s', 'now') * 1000)",
         )
         .fetch_one(self.guard.pool())
         .await

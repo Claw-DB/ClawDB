@@ -75,6 +75,16 @@ impl ClawDBClient {
         self.retry_json(Method::POST, path, Some(&val)).await
     }
 
+    /// PATCH a resource with a JSON body and receive a JSON response.
+    pub async fn patch<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> CliResult<T> {
+        let val = serde_json::to_value(body)?;
+        self.retry_json(Method::PATCH, path, Some(&val)).await
+    }
+
     /// DELETE a resource (ignores empty response body).
     pub async fn delete(&self, path: &str) -> CliResult<()> {
         let url = self.url(path);

@@ -7,7 +7,7 @@ use crate::client::ClawDBClient;
 use crate::config::save_session_token;
 use crate::error::CliResult;
 use crate::output::{print_success, OutputFormat};
-use crate::types::SessionInfo;
+use crate::types::{ActiveSessionCountResponse, SessionInfo};
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionArgs {
@@ -23,6 +23,8 @@ pub enum SessionCommand {
     Revoke(SessionRevokeArgs),
     /// Show info about the current session token.
     Whoami,
+    /// Show the count of currently active sessions.
+    ActiveCount,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -117,6 +119,19 @@ pub async fn execute(
                             "expires_at : {}",
                             info.expires_at.as_deref().unwrap_or("N/A")
                         );
+                    }
+                }
+            }
+        }
+
+        SessionCommand::ActiveCount => {
+            let resp: ActiveSessionCountResponse =
+                client.get("/v1/sessions/active/count").await?;
+            match fmt {
+                OutputFormat::Json => crate::output::print_json(&resp, quiet),
+                _ => {
+                    if !quiet {
+                        println!("active sessions: {}", resp.count);
                     }
                 }
             }

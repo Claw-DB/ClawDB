@@ -73,6 +73,7 @@ async fn run(cli: Cli, cfg: CliConfig, fmt: &OutputFormat, quiet: bool) -> Resul
         Commands::Branch(args) => commands::branch::execute(args, &client, fmt, quiet).await,
         Commands::Sync(args) => commands::sync::execute(args, &client, fmt, quiet).await,
         Commands::Reflect(args) => commands::reflect::execute(args, &client, fmt, quiet).await,
+        Commands::Tx(args) => commands::tx::execute(args, &client, fmt, quiet).await,
         Commands::Policy(args) => commands::policy::execute(args, &client, fmt, quiet).await,
         Commands::Config(args) => commands::config::execute(args, fmt, quiet).await,
         Commands::Mcp(args) => commands::mcp::execute(args, fmt, quiet).await,
