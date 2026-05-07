@@ -1,6 +1,6 @@
 [package]
 name = "clawdb-server"
-version = "0.1.2"
+version = "0.1.8"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,7 +19,7 @@ name = "clawdb-server"
 path = "src/main.rs"
 
 [dependencies]
-clawdb = { path = "../clawdb", version = "0.1.2" }
+clawdb = { path = "../clawdb", version = "0.1.8" }
 tokio = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls", "tls-roots"] }
 prost = { workspace = true }

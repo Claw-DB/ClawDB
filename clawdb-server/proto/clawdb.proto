@@ -9,14 +9,36 @@ service ClawDBService {
   rpc RevokeSession (RevokeSessionRequest) returns (RevokeSessionResponse);
   rpc Remember (RememberRequest) returns (RememberResponse);
   rpc RememberTyped (RememberTypedRequest) returns (RememberResponse);
+  rpc UpdateMemory (UpdateMemoryRequest) returns (UpdateMemoryResponse);
   rpc Search (SearchRequest) returns (SearchResponse);
   rpc Recall (RecallRequest) returns (RecallResponse);
+  rpc ListMemories (ListMemoriesRequest) returns (ListMemoriesResponse);
+  rpc DeleteMemory (DeleteMemoryRequest) returns (DeleteMemoryResponse);
   rpc Branch (BranchRequest) returns (BranchResponse);
+  rpc GetBranch (GetBranchRequest) returns (GetBranchResponse);
+  rpc GetBranchByName (GetBranchByNameRequest) returns (GetBranchResponse);
+  rpc GetTrunkBranch (GetTrunkBranchRequest) returns (GetBranchResponse);
+  rpc ListBranches (ListBranchesRequest) returns (ListBranchesResponse);
+  rpc DiscardBranch (DiscardBranchRequest) returns (DiscardBranchResponse);
+  rpc ArchiveBranch (ArchiveBranchRequest) returns (ArchiveBranchResponse);
   rpc Merge (MergeRequest) returns (MergeResponse);
   rpc Diff (DiffRequest) returns (DiffResponse);
   rpc Sync (SyncRequest) returns (SyncResponse);
+  rpc PushSync (PushSyncRequest) returns (SyncActionResponse);
+  rpc PullSync (PullSyncRequest) returns (SyncActionResponse);
+  rpc ReconcileSync (ReconcileSyncRequest) returns (SyncActionResponse);
+  rpc SyncStatus (SyncStatusRequest) returns (SyncStatusResponse);
   rpc Reflect (ReflectRequest) returns (ReflectResponse);
+  rpc ReflectGetFacts (ReflectGetFactsRequest) returns (JsonResponse);
+  rpc ReflectListJobs (ReflectListJobsRequest) returns (JsonResponse);
+  rpc ReflectGetJob (ReflectGetJobRequest) returns (JsonResponse);
+  rpc ReflectGetPreferences (ReflectGetPreferencesRequest) returns (JsonResponse);
+  rpc ReflectGetContradictions (ReflectGetContradictionsRequest) returns (JsonResponse);
+  rpc ReflectResolveContradiction (ReflectResolveContradictionRequest) returns (JsonResponse);
+  rpc ActiveSessionCount (ActiveSessionCountRequest) returns (ActiveSessionCountResponse);
   rpc BeginTx (BeginTxRequest) returns (BeginTxResponse);
+  rpc TxRemember (TxRememberRequest) returns (TxRememberResponse);
+  rpc TxRememberTyped (TxRememberTypedRequest) returns (TxRememberResponse);
   rpc CommitTx (CommitTxRequest) returns (CommitTxResponse);
   rpc RollbackTx (RollbackTxRequest) returns (RollbackTxResponse);
 }
@@ -34,6 +56,7 @@ message CreateSessionRequest {
   string agent_id = 1;
   string role = 2;
   repeated string scopes = 3;
+  uint64 ttl_secs = 4;
 }
 
 message CreateSessionResponse {
@@ -82,6 +105,16 @@ message RememberResponse {
   string request_id = 3;
 }
 
+message UpdateMemoryRequest {
+  string memory_id = 1;
+  string content = 2;
+}
+
+message UpdateMemoryResponse {
+  bool updated = 1;
+  string request_id = 2;
+}
+
 message SearchRequest {
   string query = 1;
   uint32 top_k = 2;
@@ -119,6 +152,25 @@ message RecallResponse {
   string request_id = 2;
 }
 
+message ListMemoriesRequest {
+  string type = 1;
+  uint32 limit = 2;
+}
+
+message ListMemoriesResponse {
+  repeated MemoryRecord memories = 1;
+  string request_id = 2;
+}
+
+message DeleteMemoryRequest {
+  string memory_id = 1;
+}
+
+message DeleteMemoryResponse {
+  bool deleted = 1;
+  string request_id = 2;
+}
+
 message BranchRequest {
   string name = 1;
   string from = 2;
@@ -128,6 +180,51 @@ message BranchResponse {
   string branch_id = 1;
   string name = 2;
   string request_id = 3;
+}
+
+message BranchRecord {
+  string branch_id = 1;
+  string branch_json = 2;
+}
+
+message GetBranchRequest {
+  string branch_id = 1;
+}
+
+message GetBranchByNameRequest {
+  string name = 1;
+}
+
+message GetTrunkBranchRequest {}
+
+message GetBranchResponse {
+  BranchRecord branch = 1;
+  string request_id = 2;
+}
+
+message ListBranchesRequest {}
+
+message ListBranchesResponse {
+  repeated BranchRecord branches = 1;
+  string request_id = 2;
+}
+
+message DiscardBranchRequest {
+  string branch_id = 1;
+}
+
+message DiscardBranchResponse {
+  bool discarded = 1;
+  string request_id = 2;
+}
+
+message ArchiveBranchRequest {
+  string branch_id = 1;
+}
+
+message ArchiveBranchResponse {
+  bool archived = 1;
+  string request_id = 2;
 }
 
 message MergeRequest {
@@ -170,6 +267,24 @@ message SyncResponse {
   string request_id = 5;
 }
 
+message PushSyncRequest {}
+
+message PullSyncRequest {}
+
+message ReconcileSyncRequest {}
+
+message SyncStatusRequest {}
+
+message SyncActionResponse {
+  string summary_json = 1;
+  string request_id = 2;
+}
+
+message SyncStatusResponse {
+  string status_json = 1;
+  string request_id = 2;
+}
+
 message ReflectRequest {}
 
 message ReflectResponse {
@@ -180,10 +295,70 @@ message ReflectResponse {
   string request_id = 5;
 }
 
+message ReflectGetFactsRequest {
+  string agent_id = 1;
+}
+
+message ReflectListJobsRequest {
+  string agent_id = 1;
+  string status = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+
+message ReflectGetJobRequest {
+  string job_id = 1;
+}
+
+message ReflectGetPreferencesRequest {
+  string agent_id = 1;
+}
+
+message ReflectGetContradictionsRequest {
+  string agent_id = 1;
+}
+
+message ReflectResolveContradictionRequest {
+  string agent_id = 1;
+  string contradiction_id = 2;
+  string strategy = 3;
+  string merged_value_json = 4;
+}
+
+message JsonResponse {
+  string json = 1;
+  string request_id = 2;
+}
+
+message ActiveSessionCountRequest {}
+
+message ActiveSessionCountResponse {
+  uint64 count = 1;
+  string request_id = 2;
+}
+
 message BeginTxRequest {}
 
 message BeginTxResponse {
   string tx_id = 1;
+  string request_id = 2;
+}
+
+message TxRememberRequest {
+  string tx_id = 1;
+  string content = 2;
+}
+
+message TxRememberTypedRequest {
+  string tx_id = 1;
+  string content = 2;
+  string type = 3;
+  repeated string tags = 4;
+  string metadata_json = 5;
+}
+
+message TxRememberResponse {
+  string memory_id = 1;
   string request_id = 2;
 }
 
