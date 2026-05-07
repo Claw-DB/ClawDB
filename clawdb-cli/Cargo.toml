@@ -23,8 +23,7 @@ doc = false
 [dependencies]
 clap          = { version = "4", features = ["derive", "env", "string", "wrap_help"] }
 clap_complete = "4"
-reqwest       = { version = "0.12", default-features = false,
-				  features = ["json", "rustls-tls", "gzip"] }
+reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 tokio         = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }

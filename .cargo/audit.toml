@@ -1,0 +1,8 @@
+[advisories]
+# RUSTSEC-2023-0071: rsa crate Marvin Attack timing side-channel.
+# Affects rsa 0.9.x via sqlx-mysql and jsonwebtoken. No fixed version is
+# available upstream; ignore until the advisory is resolved or the dependency
+# is replaced. Track upstream status at:
+#   https://rustsec.org/advisories/RUSTSEC-2023-0071
+#   https://github.com/RustCrypto/RSA/issues/19
+ignore = ["RUSTSEC-2023-0071"]
