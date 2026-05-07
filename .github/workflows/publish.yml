@@ -13,7 +13,6 @@ env:
 
 jobs:
   publish-crates:
-    if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,26 +21,37 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check publish token
+        id: token
+        run: |
+          if [ -n "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish clawdb
+        if: steps.token.outputs.present == 'true'
         run: cargo publish -p clawdb --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
 
       - name: Wait for index update (clawdb)
+        if: steps.token.outputs.present == 'true'
         run: sleep 30
 
       - name: Publish clawdb-server
+        if: steps.token.outputs.present == 'true'
         run: cargo publish -p clawdb-server --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
 
       - name: Wait for index update (clawdb-server)
+        if: steps.token.outputs.present == 'true'
         run: sleep 30
 
       - name: Publish clawdb-cli
+        if: steps.token.outputs.present == 'true'
         run: cargo publish -p clawdb-cli --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
 
-  publish-crates-skipped:
-    if: ${{ secrets.CARGO_REGISTRY_TOKEN == '' }}
-    runs-on: ubuntu-latest
-    steps:
       - name: Skip publish (no token)
+        if: steps.token.outputs.present != 'true'
         run: echo "CARGO_REGISTRY_TOKEN is not set; skipping crates publish jobs."
 
   build-binaries:
