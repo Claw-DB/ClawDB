@@ -1,20 +1,8 @@
 name: Release Binaries
 
 on:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: "Branch, tag, or commit SHA to build"
-        required: true
-        default: "main"
-      tag_name:
-        description: "Release tag to create/update (for example: v0.1.8-rc2)"
-        required: true
-      prerelease:
-        description: "Mark release as pre-release"
-        required: true
-        type: boolean
-        default: true
+  push:
+    tags: ['v*']
 
 jobs:
   build:
@@ -38,8 +26,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -107,9 +93,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag_name }}
-          target_commitish: ${{ inputs.ref }}
-          prerelease: ${{ inputs.prerelease }}
           files: |
             clawdb-*.tar.gz
             checksums-final.txt
