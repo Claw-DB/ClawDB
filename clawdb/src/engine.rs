@@ -507,10 +507,28 @@ impl ClawDB {
 
     /// Deletes a memory by id.
     #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, memory_id = %memory_id))]
-    pub async fn delete_memory(&self, session: &ClawDBSession, memory_id: Uuid) -> ClawDBResult<()> {
+    pub async fn delete_memory(
+        &self,
+        session: &ClawDBSession,
+        memory_id: Uuid,
+    ) -> ClawDBResult<()> {
         self.authorize(session, &["memory:write", "memory:*", "*"])
             .await?;
         self.core.delete_memory(memory_id).await?;
+        Ok(())
+    }
+
+    /// Updates memory content by id.
+    #[tracing::instrument(skip(self, session, content), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, memory_id = %memory_id))]
+    pub async fn update_memory(
+        &self,
+        session: &ClawDBSession,
+        memory_id: Uuid,
+        content: &str,
+    ) -> ClawDBResult<()> {
+        self.authorize(session, &["memory:write", "memory:*", "*"])
+            .await?;
+        self.core.update_memory(memory_id, content).await?;
         Ok(())
     }
 
@@ -574,6 +592,26 @@ impl ClawDB {
         Ok(self.branch.list(None).await?)
     }
 
+    /// Returns a branch by name.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, branch_name = %name))]
+    pub async fn get_branch_by_name(
+        &self,
+        session: &ClawDBSession,
+        name: &str,
+    ) -> ClawDBResult<claw_branch::Branch> {
+        self.authorize(session, &["branch:read", "branch:*", "*"])
+            .await?;
+        Ok(self.branch.get_by_name(name).await?)
+    }
+
+    /// Returns the trunk branch.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn trunk_branch(&self, session: &ClawDBSession) -> ClawDBResult<claw_branch::Branch> {
+        self.authorize(session, &["branch:read", "branch:*", "*"])
+            .await?;
+        Ok(self.branch.trunk().await?)
+    }
+
     /// Merges a source branch into a target branch.
     #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn merge(
@@ -624,10 +662,27 @@ impl ClawDB {
 
     /// Discards a branch.
     #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, branch_id = %branch_id))]
-    pub async fn discard_branch(&self, session: &ClawDBSession, branch_id: Uuid) -> ClawDBResult<()> {
+    pub async fn discard_branch(
+        &self,
+        session: &ClawDBSession,
+        branch_id: Uuid,
+    ) -> ClawDBResult<()> {
         self.authorize(session, &["branch:write", "branch:*", "*"])
             .await?;
         self.branch.discard(branch_id).await?;
+        Ok(())
+    }
+
+    /// Archives a branch.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, branch_id = %branch_id))]
+    pub async fn archive_branch(
+        &self,
+        session: &ClawDBSession,
+        branch_id: Uuid,
+    ) -> ClawDBResult<()> {
+        self.authorize(session, &["branch:write", "branch:*", "*"])
+            .await?;
+        self.branch.archive(branch_id).await?;
         Ok(())
     }
 
@@ -666,6 +721,50 @@ impl ClawDB {
         })
     }
 
+    /// Runs an immediate push sync pass.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn push_sync(
+        &self,
+        session: &ClawDBSession,
+    ) -> ClawDBResult<claw_sync::sync::push::PushStats> {
+        self.authorize(session, &["sync:write", "sync:*", "*"])
+            .await?;
+        Ok(self.sync.push_now().await?)
+    }
+
+    /// Runs an immediate pull sync pass.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn pull_sync(
+        &self,
+        session: &ClawDBSession,
+    ) -> ClawDBResult<claw_sync::sync::pull::PullStats> {
+        self.authorize(session, &["sync:write", "sync:*", "*"])
+            .await?;
+        Ok(self.sync.pull_now().await?)
+    }
+
+    /// Runs reconciliation and follow-up push/pull work.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn reconcile_sync(
+        &self,
+        session: &ClawDBSession,
+    ) -> ClawDBResult<claw_sync::sync::reconcile::ReconcileStats> {
+        self.authorize(session, &["sync:write", "sync:*", "*"])
+            .await?;
+        Ok(self.sync.reconcile().await?)
+    }
+
+    /// Returns current sync engine status.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn sync_status(
+        &self,
+        session: &ClawDBSession,
+    ) -> ClawDBResult<claw_sync::engine::SyncStatus> {
+        self.authorize(session, &["sync:read", "sync:*", "*"])
+            .await?;
+        Ok(self.sync.status())
+    }
+
     /// Triggers a reflect job when the reflect client is configured.
     #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
     pub async fn reflect(&self, session: &ClawDBSession) -> ClawDBResult<ReflectSummary> {
@@ -685,6 +784,110 @@ impl ClawDB {
             message: job.message,
             skipped: false,
         })
+    }
+
+    /// Returns extracted profile facts for an agent.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, target_agent = %agent_id))]
+    pub async fn reflect_get_facts(
+        &self,
+        session: &ClawDBSession,
+        agent_id: &str,
+    ) -> ClawDBResult<Vec<claw_reflect_client::ExtractedFact>> {
+        self.authorize(session, &["reflect:read", "reflect:*", "*"])
+            .await?;
+        let reflect = self
+            .reflect
+            .as_ref()
+            .ok_or(ClawDBError::ComponentDisabled("reflect"))?;
+        Ok(reflect.get_facts(agent_id).await?)
+    }
+
+    /// Lists reflect jobs.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id))]
+    pub async fn reflect_list_jobs(
+        &self,
+        session: &ClawDBSession,
+        agent_id: Option<&str>,
+        status: Option<&str>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> ClawDBResult<Vec<claw_reflect_client::ReflectionJobSummary>> {
+        self.authorize(session, &["reflect:read", "reflect:*", "*"])
+            .await?;
+        let reflect = self
+            .reflect
+            .as_ref()
+            .ok_or(ClawDBError::ComponentDisabled("reflect"))?;
+        Ok(reflect.list_jobs(agent_id, status, limit, offset).await?)
+    }
+
+    /// Returns a reflect job with detailed results.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, job_id = %job_id))]
+    pub async fn reflect_get_job(
+        &self,
+        session: &ClawDBSession,
+        job_id: &str,
+    ) -> ClawDBResult<claw_reflect_client::ReflectionJobDetails> {
+        self.authorize(session, &["reflect:read", "reflect:*", "*"])
+            .await?;
+        let reflect = self
+            .reflect
+            .as_ref()
+            .ok_or(ClawDBError::ComponentDisabled("reflect"))?;
+        Ok(reflect.get_job(job_id).await?)
+    }
+
+    /// Returns profile preferences for an agent.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, target_agent = %agent_id))]
+    pub async fn reflect_get_preferences(
+        &self,
+        session: &ClawDBSession,
+        agent_id: &str,
+    ) -> ClawDBResult<Vec<claw_reflect_client::Preference>> {
+        self.authorize(session, &["reflect:read", "reflect:*", "*"])
+            .await?;
+        let reflect = self
+            .reflect
+            .as_ref()
+            .ok_or(ClawDBError::ComponentDisabled("reflect"))?;
+        Ok(reflect.get_preferences(agent_id).await?)
+    }
+
+    /// Returns profile contradictions for an agent.
+    #[tracing::instrument(skip(self, session), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, target_agent = %agent_id))]
+    pub async fn reflect_get_contradictions(
+        &self,
+        session: &ClawDBSession,
+        agent_id: &str,
+    ) -> ClawDBResult<Vec<claw_reflect_client::Contradiction>> {
+        self.authorize(session, &["reflect:read", "reflect:*", "*"])
+            .await?;
+        let reflect = self
+            .reflect
+            .as_ref()
+            .ok_or(ClawDBError::ComponentDisabled("reflect"))?;
+        Ok(reflect.get_contradictions(agent_id).await?)
+    }
+
+    /// Resolves a profile contradiction.
+    #[tracing::instrument(skip(self, session, merged_value), fields(workspace_id = %session.workspace_id, agent_id = %session.agent_id, target_agent = %agent_id, contradiction_id = %contradiction_id))]
+    pub async fn reflect_resolve_contradiction(
+        &self,
+        session: &ClawDBSession,
+        agent_id: &str,
+        contradiction_id: &str,
+        strategy: &str,
+        merged_value: Option<serde_json::Value>,
+    ) -> ClawDBResult<claw_reflect_client::Contradiction> {
+        self.authorize(session, &["reflect:write", "reflect:*", "*"])
+            .await?;
+        let reflect = self
+            .reflect
+            .as_ref()
+            .ok_or(ClawDBError::ComponentDisabled("reflect"))?;
+        Ok(reflect
+            .resolve_contradiction(agent_id, contradiction_id, strategy, merged_value)
+            .await?)
     }
 
     /// Starts a transaction over the core engine and stages vector work for commit.
@@ -721,10 +924,7 @@ impl ClawDB {
     /// Revokes a session by identifier.
     #[tracing::instrument(skip(self))]
     pub async fn revoke_session(&self, session_id: Uuid) -> ClawDBResult<()> {
-        self.guard
-            .sessions()
-            .revoke_session(session_id)
-            .await?;
+        self.guard.sessions().revoke_session(session_id).await?;
         Ok(())
     }
 

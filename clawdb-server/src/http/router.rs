@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     http::auth::{self, AuthContext},
-    state::{AppState, RequestId},
+    state::{AppState, RequestId, StagedMemory},
 };
 
 #[derive(Deserialize)]
@@ -39,6 +39,11 @@ struct MemoryBody {
     tags: Vec<String>,
     #[serde(default)]
     metadata: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct UpdateMemoryBody {
+    content: String,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +87,25 @@ struct DiffQuery {
     target: Uuid,
 }
 
+#[derive(Deserialize)]
+struct ReflectJobsQuery {
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    offset: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct ResolveContradictionBody {
+    strategy: String,
+    #[serde(default)]
+    merged_value: Option<serde_json::Value>,
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     let public = Router::new()
         .route("/v1/health", get(health))
@@ -92,15 +116,46 @@ pub fn router(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/v1/sessions/me", get(whoami))
         .route("/v1/sessions/:id", delete(revoke_session))
+        .route("/v1/sessions/active/count", get(active_session_count))
         .route("/v1/memories", post(remember).get(list_memories))
         .route("/v1/memories/search", get(search))
-        .route("/v1/memories/:id", get(recall_one).delete(delete_memory))
+        .route(
+            "/v1/memories/:id",
+            get(recall_one).patch(update_memory).delete(delete_memory),
+        )
         .route("/v1/branches", post(create_branch).get(list_branches))
+        .route("/v1/branches/trunk", get(get_trunk_branch))
+        .route("/v1/branches/by-name/:name", get(get_branch_by_name))
         .route("/v1/branches/:id/merge", post(merge_branch))
         .route("/v1/branches/:id/diff", get(diff_branch))
-        .route("/v1/branches/:id", delete(discard_branch))
+        .route("/v1/branches/:id/archive", post(archive_branch))
+        .route("/v1/branches/:id", get(get_branch).delete(discard_branch))
         .route("/v1/sync", post(sync))
+        .route("/v1/sync/push", post(push_sync))
+        .route("/v1/sync/pull", post(pull_sync))
+        .route("/v1/sync/reconcile", post(reconcile_sync))
+        .route("/v1/sync/status", get(sync_status))
         .route("/v1/reflect", post(reflect))
+        .route("/v1/reflect/jobs", get(list_reflect_jobs))
+        .route("/v1/reflect/jobs/:job_id", get(get_reflect_job))
+        .route("/v1/reflect/facts/:agent_id", get(get_reflect_facts))
+        .route(
+            "/v1/reflect/preferences/:agent_id",
+            get(get_reflect_preferences),
+        )
+        .route(
+            "/v1/reflect/contradictions/:agent_id",
+            get(get_reflect_contradictions),
+        )
+        .route(
+            "/v1/reflect/contradictions/:agent_id/:contradiction_id/resolve",
+            post(resolve_reflect_contradiction),
+        )
+        .route("/v1/tx", post(begin_transaction))
+        .route("/v1/tx/:id/memories", post(tx_remember))
+        .route("/v1/tx/:id/memories/typed", post(tx_remember_typed))
+        .route("/v1/tx/:id/commit", post(commit_transaction))
+        .route("/v1/tx/:id/rollback", post(rollback_transaction))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth::rate_limit_middleware,
@@ -323,6 +378,19 @@ async fn delete_memory(
     }
 }
 
+async fn update_memory(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateMemoryBody>,
+) -> Response {
+    match state.db.update_memory(&auth.session, id, &body.content).await {
+        Ok(()) => Json(serde_json::json!({"updated": true, "memory_id": id})).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
 async fn create_branch(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -347,6 +415,41 @@ async fn list_branches(
 ) -> Response {
     match state.db.list_branches(&auth.session).await {
         Ok(branches) => Json(branches).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn get_branch(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match state.db.get_branch(&auth.session, id).await {
+        Ok(branch) => Json(branch).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn get_branch_by_name(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(name): Path<String>,
+) -> Response {
+    match state.db.get_branch_by_name(&auth.session, &name).await {
+        Ok(branch) => Json(branch).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn get_trunk_branch(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    match state.db.trunk_branch(&auth.session).await {
+        Ok(branch) => Json(branch).into_response(),
         Err(error) => map_error(error, Some(request_id.0)),
     }
 }
@@ -398,12 +501,68 @@ async fn discard_branch(
     }
 }
 
+async fn archive_branch(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match state.db.archive_branch(&auth.session, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
 async fn sync(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Extension(request_id): Extension<RequestId>,
 ) -> Response {
     match state.db.sync(&auth.session).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn push_sync(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    match state.db.push_sync(&auth.session).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn pull_sync(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    match state.db.pull_sync(&auth.session).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn reconcile_sync(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    match state.db.reconcile_sync(&auth.session).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn sync_status(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    match state.db.sync_status(&auth.session).await {
         Ok(result) => Json(result).into_response(),
         Err(error) => map_error(error, Some(request_id.0)),
     }
@@ -416,6 +575,248 @@ async fn reflect(
 ) -> Response {
     match state.db.reflect(&auth.session).await {
         Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn get_reflect_facts(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(agent_id): Path<String>,
+) -> Response {
+    match state.db.reflect_get_facts(&auth.session, &agent_id).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn list_reflect_jobs(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Query(query): Query<ReflectJobsQuery>,
+) -> Response {
+    match state
+        .db
+        .reflect_list_jobs(
+            &auth.session,
+            query.agent_id.as_deref(),
+            query.status.as_deref(),
+            query.limit,
+            query.offset,
+        )
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn get_reflect_job(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(job_id): Path<String>,
+) -> Response {
+    match state.db.reflect_get_job(&auth.session, &job_id).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn get_reflect_preferences(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(agent_id): Path<String>,
+) -> Response {
+    match state.db.reflect_get_preferences(&auth.session, &agent_id).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn get_reflect_contradictions(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path(agent_id): Path<String>,
+) -> Response {
+    match state
+        .db
+        .reflect_get_contradictions(&auth.session, &agent_id)
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn resolve_reflect_contradiction(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Extension(request_id): Extension<RequestId>,
+    Path((agent_id, contradiction_id)): Path<(String, String)>,
+    Json(body): Json<ResolveContradictionBody>,
+) -> Response {
+    match state
+        .db
+        .reflect_resolve_contradiction(
+            &auth.session,
+            &agent_id,
+            &contradiction_id,
+            &body.strategy,
+            body.merged_value,
+        )
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn active_session_count(
+    State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    match state.db.active_session_count().await {
+        Ok(count) => Json(serde_json::json!({"count": count})).into_response(),
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn begin_transaction(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Response {
+    let tx_id = Uuid::new_v4();
+    state.transactions.lock().await.insert(
+        tx_id,
+        crate::state::PendingTransaction {
+            id: tx_id,
+            session: auth.session,
+            staged_memories: Vec::new(),
+        },
+    );
+    Json(serde_json::json!({"tx_id": tx_id})).into_response()
+}
+
+async fn tx_remember(
+    State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateMemoryBody>,
+) -> Response {
+    let mut transactions = state.transactions.lock().await;
+    let Some(pending) = transactions.get_mut(&id) else {
+        return auth::error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            Some("transaction not found".to_string()),
+            Some(request_id.0),
+            None,
+        );
+    };
+    pending.staged_memories.push(StagedMemory {
+        content: body.content,
+        memory_type: "semantic".to_string(),
+        tags: Vec::new(),
+        metadata: serde_json::Value::Null,
+    });
+    Json(serde_json::json!({"staged": true})).into_response()
+}
+
+async fn tx_remember_typed(
+    State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<MemoryBody>,
+) -> Response {
+    let memory_type = body.r#type.unwrap_or_else(|| "semantic".to_string());
+    let mut transactions = state.transactions.lock().await;
+    let Some(pending) = transactions.get_mut(&id) else {
+        return auth::error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            Some("transaction not found".to_string()),
+            Some(request_id.0),
+            None,
+        );
+    };
+    pending.staged_memories.push(StagedMemory {
+        content: body.content,
+        memory_type,
+        tags: body.tags,
+        metadata: body.metadata,
+    });
+    Json(serde_json::json!({"staged": true})).into_response()
+}
+
+async fn commit_transaction(
+    State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let pending = match state.transactions.lock().await.remove(&id) {
+        Some(pending) => pending,
+        None => {
+            return auth::error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                Some("transaction not found".to_string()),
+                Some(request_id.0),
+                None,
+            );
+        }
+    };
+
+    match state.db.transaction(&pending.session).await {
+        Ok(mut tx) => {
+            for staged in pending.staged_memories {
+                if let Err(error) = tx
+                    .remember_typed(
+                        &staged.content,
+                        &staged.memory_type,
+                        &staged.tags,
+                        staged.metadata,
+                    )
+                    .await
+                {
+                    return map_error(error, Some(request_id.0));
+                }
+            }
+            match tx.commit().await {
+                Ok(()) => Json(serde_json::json!({"committed": true})).into_response(),
+                Err(error) => map_error(error, Some(request_id.0)),
+            }
+        }
+        Err(error) => map_error(error, Some(request_id.0)),
+    }
+}
+
+async fn rollback_transaction(
+    State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
+    Path(id): Path<Uuid>,
+) -> Response {
+    let pending = match state.transactions.lock().await.remove(&id) {
+        Some(pending) => pending,
+        None => {
+            return auth::error_response(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                Some("transaction not found".to_string()),
+                Some(request_id.0),
+                None,
+            );
+        }
+    };
+    match state.db.transaction(&pending.session).await {
+        Ok(tx) => match tx.rollback().await {
+            Ok(()) => Json(serde_json::json!({"rolled_back": true})).into_response(),
+            Err(error) => map_error(error, Some(request_id.0)),
+        },
         Err(error) => map_error(error, Some(request_id.0)),
     }
 }

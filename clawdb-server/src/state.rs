@@ -146,6 +146,15 @@ impl Default for ServerMetrics {
 pub struct PendingTransaction {
     pub id: Uuid,
     pub session: ClawDBSession,
+    pub staged_memories: Vec<StagedMemory>,
+}
+
+#[derive(Clone)]
+pub struct StagedMemory {
+    pub content: String,
+    pub memory_type: String,
+    pub tags: Vec<String>,
+    pub metadata: serde_json::Value,
 }
 
 pub struct AppState {
