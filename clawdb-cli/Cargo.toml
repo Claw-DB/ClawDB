@@ -43,5 +43,5 @@ backoff       = { workspace = true }
 assert_cmd  = "2"
 wiremock    = "0.6"
 tempfile    = "3"
-predicates  = "2"
+predicates  = "3"
 tokio       = { workspace = true }
