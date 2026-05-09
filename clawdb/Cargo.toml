@@ -56,7 +56,7 @@ claw-reflect-client.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 toml = "0.8"
-notify = "6"
+notify = "8"
 reqwest = { version = "0.12", features = ["json"] }
 anyhow = "1"
 cfg-if = "1"
