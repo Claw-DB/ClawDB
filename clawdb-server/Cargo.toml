@@ -42,7 +42,7 @@ dirs = "5"
 config = "0.14"
 http = "1"
 rcgen = "0.12"
-tonic-reflection = "0.12"
+tonic-reflection = "0.14"
 
 [build-dependencies]
 tonic-build = { version = "0.12", features = ["prost"] }
