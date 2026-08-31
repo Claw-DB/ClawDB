@@ -35,7 +35,7 @@ toml          = "0.8"
 dirs          = "5"
 tabled        = "0.15"
 indicatif     = "0.17"
-dialoguer     = "0.11"
+dialoguer     = "0.12"
 colored       = "2"
 backoff       = { workspace = true }
 
