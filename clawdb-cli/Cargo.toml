@@ -32,7 +32,7 @@ tracing       = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror     = { workspace = true }
 toml          = "0.8"
-dirs          = "5"
+dirs          = "6"
 tabled        = "0.15"
 indicatif     = "0.17"
 dialoguer     = "0.11"
