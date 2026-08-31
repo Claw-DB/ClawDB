@@ -41,7 +41,7 @@ anyhow = "1"
 dirs = "5"
 config = "0.14"
 http = "1"
-rcgen = "0.12"
+rcgen = "0.14"
 tonic-reflection = "0.12"
 
 [build-dependencies]
